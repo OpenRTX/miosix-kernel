@@ -1,0 +1,513 @@
+From bfb4e13ff1be38ddffa5c091a2760ee4b8e82d91 Mon Sep 17 00:00:00 2001
+From: Silvano Seva <silseva@fastwebnet.it>
+Date: Mon, 8 Mar 2021 15:30:38 +0100
+Subject: [PATCH] OpenRTX patch
+
+---
+ miosix/Makefile                               |   4 +-
+ .../interfaces-impl/arch_registers_impl.h     |  13 +++
+ .../M4_openrtx/interfaces-impl/bsp_impl.h     |  63 +++++++++++
+ .../M4_openrtx/board_settings.h               |  90 +++++++++++++++
+ miosix/config/miosix_settings.h               |  16 +--
+ .../stdlib_integration/libc_integration.cpp   | 104 +++---------------
+ 6 files changed, 193 insertions(+), 97 deletions(-)
+ create mode 100644 miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h
+ create mode 100644 miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/bsp_impl.h
+ create mode 100644 miosix/config/arch/cortexM4_stm32f4/M4_openrtx/board_settings.h
+
+diff --git a/miosix/Makefile b/miosix/Makefile
+index 95d8c79..5f4aa5d 100644
+--- a/miosix/Makefile
++++ b/miosix/Makefile
+@@ -5,7 +5,9 @@
+ MAKEFILE_VERSION := 1.09
+ GCCMAJOR := $(shell arm-miosix-eabi-gcc --version | \
+                     perl -e '$$_=<>;/\(GCC\) (\d+)/;print "$$1"')
+-## KPATH and CONFPATH are forwarded by the parent Makefile
++KPATH    := .
++CONFPATH := $(KPATH)
++
+ include $(CONFPATH)/config/Makefile.inc
+ 
+ ## List of all Miosix OS source files that have no special requirements
+diff --git a/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h b/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h
+new file mode 100644
+index 0000000..6f6d8a7
+--- /dev/null
++++ b/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h
+@@ -0,0 +1,13 @@
++
++#ifndef ARCH_REGISTERS_IMPL_H
++#define	ARCH_REGISTERS_IMPL_H
++
++//Always include stm32f4xx.h before core_cm4.h, there's some nasty dependency
++#define STM32F405xx
++#include "CMSIS/Device/ST/STM32F4xx/Include/stm32f4xx.h"
++#include "CMSIS/Include/core_cm4.h"
++#include "CMSIS/Device/ST/STM32F4xx/Include/system_stm32f4xx.h"
++
++#define RCC_SYNC() //Workaround for a bug in stm32f42x
++
++#endif	//ARCH_REGISTERS_IMPL_H
+diff --git a/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/bsp_impl.h b/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/bsp_impl.h
+new file mode 100644
+index 0000000..740bfd8
+--- /dev/null
++++ b/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/bsp_impl.h
+@@ -0,0 +1,63 @@
++/***************************************************************************
++ *   Copyright (C) 2012 by Terraneo Federico                               *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   As a special exception, if other files instantiate templates or use   *
++ *   macros or inline functions from this file, or you compile this file   *
++ *   and link it with other works to produce a work based on this file,    *
++ *   this file does not by itself cause the resulting work to be covered   *
++ *   by the GNU General Public License. However the source code for this   *
++ *   file must still be made available in accordance with the GNU General  *
++ *   Public License. This exception does not invalidate any other reasons  *
++ *   why a work based on this file might be covered by the GNU General     *
++ *   Public License.                                                       *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
++ ***************************************************************************/
++
++/***********************************************************************
++* bsp_impl.h Part of the Miosix Embedded OS.
++* Board support package, this file initializes hardware.
++************************************************************************/
++
++#ifndef BSP_IMPL_H
++#define BSP_IMPL_H
++
++#include "config/miosix_settings.h"
++#include "interfaces/gpio.h"
++
++namespace miosix {
++
++/**
++\addtogroup Hardware
++\{
++*/
++
++inline void ledOn() {}
++
++inline void ledOff() {}
++
++/**
++ * Polls the SD card sense GPIO.
++ *
++ * \return false, as there's no SD card.
++ */
++inline bool sdCardSense() { return true; }
++
++/**
++\}
++*/
++
++} //namespace miosix
++
++#endif //BSP_IMPL_H
+diff --git a/miosix/config/arch/cortexM4_stm32f4/M4_openrtx/board_settings.h b/miosix/config/arch/cortexM4_stm32f4/M4_openrtx/board_settings.h
+new file mode 100644
+index 0000000..d33881a
+--- /dev/null
++++ b/miosix/config/arch/cortexM4_stm32f4/M4_openrtx/board_settings.h
+@@ -0,0 +1,90 @@
++/***************************************************************************
++ *   Copyright (C) 2012, 2013, 2014 by Terraneo Federico                   *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   As a special exception, if other files instantiate templates or use   *
++ *   macros or inline functions from this file, or you compile this file   *
++ *   and link it with other works to produce a work based on this file,    *
++ *   this file does not by itself cause the resulting work to be covered   *
++ *   by the GNU General Public License. However the source code for this   *
++ *   file must still be made available in accordance with the GNU General  *
++ *   Public License. This exception does not invalidate any other reasons  *
++ *   why a work based on this file might be covered by the GNU General     *
++ *   Public License.                                                       *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
++ ***************************************************************************/
++
++#ifndef BOARD_SETTINGS_H
++#define	BOARD_SETTINGS_H
++
++#include "util/version.h"
++
++/**
++ * \internal
++ * Versioning for board_settings.h for out of git tree projects
++ */
++#define BOARD_SETTINGS_VERSION 100
++
++namespace miosix {
++
++/**
++ * \addtogroup Settings
++ * \{
++ */
++
++/// Size of stack for main().
++/// The C standard library is stack-heavy (iprintf requires 1KB) but the
++/// STM32F407VG only has 192KB of RAM so there is room for a big 4K stack.
++const unsigned int MAIN_STACK_SIZE=4*1024;
++
++/// Frequency of tick (in Hz). The frequency of the STM32F100RB timer in the
++/// stm32vldiscovery board can be divided by 1000. This allows to use a 1KHz
++/// tick and the minimun Thread::sleep value is 1ms
++/// For the priority scheduler this is also the context switch frequency
++const unsigned int TICK_FREQ=1000;
++
++///\internal Aux timer run @ 100KHz
++///Note that since the timer is only 16 bits this imposes a limit on the
++///burst measurement of 655ms. If due to a pause_kernel() or
++///disable_interrupts() section a thread runs for more than that time, a wrong
++///burst value will be measured
++const unsigned int AUX_TIMER_CLOCK=100000;
++const unsigned int AUX_TIMER_MAX=0xffff; ///<\internal Aux timer is 16 bits
++
++/// Serial port (USART3 PB10=TX, PB11=RX)
++const unsigned int defaultSerial=3;
++const unsigned int defaultSerialSpeed=19200;
++const bool defaultSerialFlowctrl=false;
++// Aux serial port (hardcoded USART2 PA2=TX, PA3=RX).
++// Uncomment AUX_SERIAL to enable. The device will appear as /dev/auxtty.
++//#define AUX_SERIAL "auxtty"
++const unsigned int auxSerialSpeed=9600;
++const bool auxSerialFlowctrl=false;
++//#define SERIAL_1_DMA //Serial 1 is not used, so not enabling DMA
++//#define SERIAL_2_DMA //Serial 2 DMA conflicts with I2S driver in the examples
++#define SERIAL_3_DMA
++
++//#define I2C_WITH_DMA
++
++//SD card driver
++static const unsigned char sdVoltage=30; //Board powered @ 3.0V
++#define SD_ONE_BIT_DATABUS //Can't use 4 bit databus due to pin conflicts
++
++/**
++ * \}
++ */
++
++} //namespace miosix
++
++#endif	/* BOARD_SETTINGS_H */
+diff --git a/miosix/config/miosix_settings.h b/miosix/config/miosix_settings.h
+index 45c2f4c..76ee6ee 100644
+--- a/miosix/config/miosix_settings.h
++++ b/miosix/config/miosix_settings.h
+@@ -24,7 +24,7 @@
+  *                                                                         *
+  *   You should have received a copy of the GNU General Public License     *
+  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
+- ***************************************************************************/ 
++ ***************************************************************************/
+ 
+ #ifndef MIOSIX_SETTINGS_H
+ #define MIOSIX_SETTINGS_H
+@@ -34,7 +34,7 @@
+ // The PARSING_FROM_IDE is because Netbeans gets confused by this, it is never
+ // defined when compiling the code.
+ #ifndef PARSING_FROM_IDE
+-#error This error is a reminder that you have not edited miosix_settings.h yet.
++// #error This error is a reminder that you have not edited miosix_settings.h yet.
+ #endif //PARSING_FROM_IDE
+ 
+ /**
+@@ -85,20 +85,20 @@ namespace miosix {
+ /// \def WITH_FILESYSTEM
+ /// Allows to enable/disable filesystem support to save code size
+ /// By default it is defined (filesystem support is enabled)
+-#define WITH_FILESYSTEM
++// #define WITH_FILESYSTEM
+ 
+ /// \def WITH_DEVFS
+ /// Allows to enable/disable DevFs support to save code size
+ /// By default it is defined (DevFs is enabled)
+-#define WITH_DEVFS
+-    
++// #define WITH_DEVFS
++
+ /// \def SYNC_AFTER_WRITE
+ /// Increases filesystem write robustness. After each write operation the
+ /// filesystem is synced so that a power failure happens data is not lost
+ /// (unless power failure happens exactly between the write and the sync)
+ /// Unfortunately write latency and throughput becomes twice as worse
+ /// By default it is defined (slow but safe)
+-#define SYNC_AFTER_WRITE
++// #define SYNC_AFTER_WRITE
+ 
+ /// Maximum number of open files. Trying to open more will fail.
+ /// Cannot be lower than 3, as the first three are stdin, stdout, stderr
+@@ -130,12 +130,12 @@ const unsigned char MAX_OPEN_FILES=8;
+ /// \def WITH_BOOTLOG
+ /// Uncomment to print bootlogs on stdout.
+ /// By default it is defined (bootlogs are printed)
+-#define WITH_BOOTLOG
++// #define WITH_BOOTLOG
+ 
+ /// \def WITH_ERRLOG
+ /// Uncomment for debug information on stdout.
+ /// By default it is defined (error information is printed)
+-#define WITH_ERRLOG
++// #define WITH_ERRLOG
+ 
+ 
+ 
+diff --git a/miosix/stdlib_integration/libc_integration.cpp b/miosix/stdlib_integration/libc_integration.cpp
+index a4f39db..5d8e3be 100644
+--- a/miosix/stdlib_integration/libc_integration.cpp
++++ b/miosix/stdlib_integration/libc_integration.cpp
+@@ -191,7 +191,7 @@ void *_sbrk_r(struct _reent *ptr, ptrdiff_t incr)
+ 
+     if(reinterpret_cast<unsigned int>(curHeapEnd) > miosix::maxHeapEnd)
+         miosix::maxHeapEnd=reinterpret_cast<unsigned int>(curHeapEnd);
+-    
++
+     return reinterpret_cast<void*>(prevHeapEnd);
+ }
+ 
+@@ -313,83 +313,11 @@ int close(int fd)
+     return _close_r(miosix::getReent(),fd);
+ }
+ 
+-/**
+- * \internal
+- * _write_r, write to a file
+- */
+-int _write_r(struct _reent *ptr, int fd, const void *buf, size_t cnt)
+-{    
+-    #ifdef WITH_FILESYSTEM
+-
+-    #ifndef __NO_EXCEPTIONS
+-    try {
+-    #endif //__NO_EXCEPTIONS
+-        int result=miosix::getFileDescriptorTable().write(fd,buf,cnt);
+-        if(result>=0) return result;
+-        ptr->_errno=-result;
+-        return -1;
+-    #ifndef __NO_EXCEPTIONS
+-    } catch(exception& e) {
+-        ptr->_errno=ENOMEM;
+-        return -1;
+-    }
+-    #endif //__NO_EXCEPTIONS
+-    
+-    #else //WITH_FILESYSTEM
+-    if(fd==STDOUT_FILENO || fd==STDERR_FILENO)
+-    {
+-        int result=miosix::DefaultConsole::instance().getTerminal()->write(buf,cnt);
+-        if(result>=0) return result;
+-        ptr->_errno=-result;
+-        return -1;
+-    } else {
+-        ptr->_errno=EBADF;
+-        return -1;
+-    }
+-    #endif //WITH_FILESYSTEM
+-}
+-
+ int write(int fd, const void *buf, size_t cnt)
+ {
+     return _write_r(miosix::getReent(),fd,buf,cnt);
+ }
+ 
+-/**
+- * \internal
+- * _read_r, read from a file
+- */
+-int _read_r(struct _reent *ptr, int fd, void *buf, size_t cnt)
+-{
+-    #ifdef WITH_FILESYSTEM
+-
+-    #ifndef __NO_EXCEPTIONS
+-    try {
+-    #endif //__NO_EXCEPTIONS
+-        int result=miosix::getFileDescriptorTable().read(fd,buf,cnt);
+-        if(result>=0) return result;
+-        ptr->_errno=-result;
+-        return -1;
+-    #ifndef __NO_EXCEPTIONS
+-    } catch(exception& e) {
+-        ptr->_errno=ENOMEM;
+-        return -1;
+-    }
+-    #endif //__NO_EXCEPTIONS
+-    
+-    #else //WITH_FILESYSTEM
+-    if(fd==STDIN_FILENO)
+-    {
+-        int result=miosix::DefaultConsole::instance().getTerminal()->read(buf,cnt);
+-        if(result>=0) return result;
+-        ptr->_errno=-result;
+-        return -1;
+-    } else {
+-        ptr->_errno=EBADF;
+-        return -1;
+-    }
+-    #endif //WITH_FILESYSTEM
+-}
+-
+ int read(int fd, void *buf, size_t cnt)
+ {
+     return _read_r(miosix::getReent(),fd,buf,cnt);
+@@ -416,7 +344,7 @@ off_t _lseek_r(struct _reent *ptr, int fd, off_t pos, int whence)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=EBADF;
+     return -1;
+@@ -449,7 +377,7 @@ int _fstat_r(struct _reent *ptr, int fd, struct stat *pstat)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     switch(fd)
+     {
+@@ -493,7 +421,7 @@ int _stat_r(struct _reent *ptr, const char *file, struct stat *pstat)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return -1;
+@@ -526,7 +454,7 @@ int _isatty_r(struct _reent *ptr, int fd)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     switch(fd)
+     {
+@@ -566,7 +494,7 @@ int _fcntl_r(struct _reent *ptr, int fd, int cmd, int opt)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return -1;
+@@ -613,7 +541,7 @@ int _ioctl_r(struct _reent *ptr, int fd, int cmd, void *arg)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     if(fd==STDIN_FILENO || fd==STDOUT_FILENO || fd==STDERR_FILENO)
+     {
+@@ -654,7 +582,7 @@ char *_getcwd_r(struct _reent *ptr, char *buf, size_t size)
+         return NULL;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return NULL;
+@@ -687,7 +615,7 @@ int _chdir_r(struct _reent *ptr, const char *path)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return -1;
+@@ -720,7 +648,7 @@ int _mkdir_r(struct _reent *ptr, const char *path, int mode)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return -1;
+@@ -753,7 +681,7 @@ int _rmdir_r(struct _reent *ptr, const char *path)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return -1;
+@@ -801,7 +729,7 @@ int _unlink_r(struct _reent *ptr, const char *file)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return -1;
+@@ -834,7 +762,7 @@ int _rename_r(struct _reent *ptr, const char *f_old, const char *f_new)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     ptr->_errno=ENOENT;
+     return -1;
+@@ -867,7 +795,7 @@ int getdents(unsigned int fd, struct dirent *dirp, unsigned int count)
+         return -1;
+     }
+     #endif //__NO_EXCEPTIONS
+-    
++
+     #else //WITH_FILESYSTEM
+     miosix::getReent()->_errno=ENOENT;
+     return -1;
+@@ -897,7 +825,7 @@ int getdents(unsigned int fd, struct dirent *dirp, unsigned int count)
+  * - time         -> gettimeofday     -> clock_gettime
+  *
+  * UNSUPPORTED
+- * - timer_create -> ? 
++ * - timer_create -> ?
+  */
+ 
+ #ifndef _MIOSIX_GCC_PATCH_MAJOR //Before GCC 9.2.0
+@@ -977,7 +905,7 @@ clock_t _times_r(struct _reent *ptr, struct tms *tim)
+     if(clock_gettime(CLOCK_MONOTONIC,&tp)) return static_cast<clock_t>(-1);
+     constexpr int divFactor=1000000000/CLOCKS_PER_SEC;
+     clock_t utime=tp.tv_sec*CLOCKS_PER_SEC + tp.tv_nsec/divFactor;
+-    
++
+     //Actually, we should return tim.utime or -1 on failure, but clock_t is
+     //unsigned, so if we return tim.utime and someone calls _times_r in an
+     //unlucky moment where tim.utime is 0xffffffff it would be interpreted as -1
+-- 
+2.30.1
+

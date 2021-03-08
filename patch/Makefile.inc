@@ -31,7 +31,7 @@ OPT_EXCEPT := -fno-exceptions -fno-rtti -D__NO_EXCEPTIONS
 ##
 ## Then, initialize C/C++ flags
 ##
-CXXSTD := -std=c++14
+CXXSTD        := -std=c++14
 CFLAGS_BASE   := -D_MIOSIX_BOARDNAME=\"$(OPT_BOARD)\" -D_DEFAULT_SOURCE=1 \
                  -ffunction-sections -Wall -Werror=return-type -g
 CXXFLAGS_BASE := -D_MIOSIX_BOARDNAME=\"$(OPT_BOARD)\" -D_DEFAULT_SOURCE=1 \
@@ -39,7 +39,7 @@ CXXFLAGS_BASE := -D_MIOSIX_BOARDNAME=\"$(OPT_BOARD)\" -D_DEFAULT_SOURCE=1 \
 
 
 ARCH_INC  := arch/cortexM4_stm32f4/common
-BOARD_INC := arch/cortexM4_stm32f4/stm32f407vg_stm32f4discovery
+BOARD_INC := arch/cortexM4_stm32f4/M4_openrtx
 BOOT_FILE :=
 ARCH_SRC  :=
 
@@ -62,26 +62,20 @@ SZ  := $(PREFIX)size
 ## Select appropriate compiler flags for both ASM/C/C++/linker
 AFLAGS_BASE   := -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
 CFLAGS_BASE   += -D_ARCH_CORTEXM4_STM32F4 $(CLOCK_FREQ) $(XRAM) $(SRAM_BOOT)\
-		-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 \
-		$(OPT_OPTIMIZATION) -c
+                 -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 \
+                 $(OPT_OPTIMIZATION) -c
 CXXFLAGS_BASE += -D_ARCH_CORTEXM4_STM32F4 $(CLOCK_FREQ) $(XRAM) $(SRAM_BOOT)\
-		-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 \
-		$(OPT_EXCEPT) $(OPT_OPTIMIZATION) -c
+                 -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 \
+                 $(OPT_EXCEPT) $(OPT_OPTIMIZATION) -c
 LFLAGS_BASE   := -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16 \
-		-Wl,--gc-sections,-Map,main.map                            \
-		-Wl,-T$(KPATH)/$(LINKER_SCRIPT) $(OPT_EXCEPT)              \
-		$(OPT_OPTIMIZATION) -nostdlib
+                 -Wl,--gc-sections,-Map,main.map $(OPT_EXCEPT)              \
+                 $(OPT_OPTIMIZATION) -nostdlib
 
 ## Select architecture specific files
 ## These are the files in arch/<arch name>/common
 ARCH_SRC +=                                              \
 arch/common/core/interrupts_cortexMx.cpp                 \
 arch/common/core/mpu_cortexMx.cpp                        \
-arch/common/drivers/serial_stm32.cpp                     \
 arch/common/drivers/dcc.cpp                              \
 $(ARCH_INC)/interfaces-impl/portability.cpp              \
-$(ARCH_INC)/interfaces-impl/gpio_impl.cpp                \
-arch/common/drivers/sd_stm32f2_f4.cpp                    \
-
-#     $(ARCH_INC)/interfaces-impl/delays.cpp                   \
-    arch/common/CMSIS/Device/ST/STM32F4xx/Source/Templates/system_stm32f4xx.c
+$(ARCH_INC)/interfaces-impl/gpio_impl.cpp
