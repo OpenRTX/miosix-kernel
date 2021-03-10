@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2013 by Terraneo Federico                               *
+ *   Copyright (C) 2010, 2011, 2012, 2013, 2014 by Terraneo Federico       *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -25,28 +25,34 @@
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  ***************************************************************************/
 
-#ifndef STAGE_2_BOOT_H
-#define	STAGE_2_BOOT_H
-
-
-namespace miosix {
+#ifndef INTERRUPTS_H
+#define	INTERRUPTS_H
 
 /**
- * \internal
- * This function will perform the part of system initialization that must be
- * done after the kernel is started. At the end, it will call main()
- * \param argv ignored parameter
+ * Called when an unexpected interrupt occurs.
+ * It is called by stage_1_boot.cpp for all weak interrupts not defined.
  */
-void *mainLoader(void *argv);
-
-} //namespace miosix
+void unexpectedInterrupt();
 
 /**
- * \internal
- * Performs the part of initialization that must be done before the kernel is
- * started, and starts the kernel.
- * This function is called by the stage 1 boot which is architecture dependent.
+ * Possible kind of faults that the Cortex-M3 can report.
+ * They are used to print debug information if a process causes a fault
  */
-extern "C" void _init();
+enum FaultType
+{
+    MP=1,          //Process attempted data access outside its memory
+    MP_NOADDR=2,   //Process attempted data access outside its memory (missing addr)
+    MP_XN=3,       //Process attempted code access outside its memory
+    UF_DIVZERO=4,  //Process attempted to divide by zero
+    UF_UNALIGNED=5,//Process attempted unaligned memory access
+    UF_COPROC=6,   //Process attempted a coprocessor access
+    UF_EXCRET=7,   //Process attempted an exception return
+    UF_EPSR=8,     //Process attempted to access the EPSR
+    UF_UNDEF=9,    //Process attempted to execute an invalid instruction
+    UF_UNEXP=10,   //Unexpected usage fault
+    HARDFAULT=11,  //Hardfault (for example process executed a BKPT instruction)
+    BF=12,         //Busfault
+    BF_NOADDR=13   //Busfault (missing addr)
+};
 
-#endif //STAGE_2_BOOT_H
+#endif	//INTERRUPTS_H

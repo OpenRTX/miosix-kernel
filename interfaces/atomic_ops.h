@@ -37,7 +37,7 @@
  * \file atomic_ops.h
  * This file contains various atomic operations useful for implementing
  * lock-free algorithms.
- * 
+ *
  * For architectures without hardware support for these operations, they are
  * emulated by disabling interrupts. Note that these functions should be safe
  * to be called also with interrupts disabled, so implementations that disable
@@ -50,7 +50,7 @@ namespace miosix {
 /**
  * Store a value in one memory location, and atomically read back the
  * previously stored value. Performs atomically the following operation:
- * 
+ *
  * \code
  * inline int atomicSwap(volatile int *p, int v)
  * {
@@ -59,7 +59,7 @@ namespace miosix {
  *      return result;
  * }
  * \endcode
- * 
+ *
  * \param p pointer to memory location where the atomic swap will take place
  * \param v new value to be stored in *p
  * \return the previous value of *p
@@ -69,14 +69,14 @@ inline int atomicSwap(volatile int *p, int v);
 /**
  * Atomically read the content of a memory location, add a number to the loaded
  * value, and store the result. Performs atomically the following operation:
- * 
+ *
  * \code
  * inline void atomicAdd(volatile int *p, int incr)
  * {
  *      *p+=incr;
  * }
  * \endcode
- * 
+ *
  * \param p pointer to memory location where the atomic add will take place
  * \param incr value to be added to *p
  */
@@ -86,7 +86,7 @@ inline void atomicAdd(volatile int *p, int incr);
  * Atomically read the content of a memory location, add a number to the loaded
  * value, store the result and return the previous value stored.
  * Performs atomically the following operation:
- * 
+ *
  * \code
  * inline int atomicAddExchange(volatile int *p, int incr)
  * {
@@ -95,7 +95,7 @@ inline void atomicAdd(volatile int *p, int incr);
  *      return result;
  * }
  * \endcode
- * 
+ *
  * \param pointer to memory location where the atomic add will take place
  * \param incr value to be added to *p
  * \return the previous value of *p
@@ -106,7 +106,7 @@ inline int atomicAddExchange(volatile int *p, int incr);
  * Atomically read the value of a memory location, and store a new value in it
  * if it matches a given value. Also, return the previously stored value.
  * Performs atomically the following operation:
- * 
+ *
  * \code
  * inline int atomicCompareAndSwap(volatile int *p, int prev, int next)
  * {
@@ -115,7 +115,7 @@ inline int atomicAddExchange(volatile int *p, int incr);
  *      return result;
  * }
  * \endcode
- * 
+ *
  * \param p pointer to the memory location to compare and swap
  * \param prev value to be compared against the content of *p
  * \param next value to be stored in *p if *p==prev
@@ -129,7 +129,7 @@ inline int atomicCompareAndSwap(volatile int *p, int prev, int next);
  * Atomically read a pointer stored in one memory loaction, and add
  * a constant to a memory loaction placed at a given offset from the
  * pointer. Performs atomically the following operation:
- * 
+ *
  * \code
  * void *atomicFetchAndIncrement(void * const volatile *p, int offset, int incr)
  * {
@@ -139,11 +139,11 @@ inline int atomicCompareAndSwap(volatile int *p, int prev, int next);
  *      return result;
  * }
  * \endcode
- * 
+ *
  * \param p pointer to a const volatile pointer to object. While p is not
  * subject to thread contention, *p is.
- * \param offset the memory location to increment is **p+offset*sizeof(int) 
- * \param incr value to be added to **p+offset*sizeof(int) 
+ * \param offset the memory location to increment is **p+offset*sizeof(int)
+ * \param incr value to be added to **p+offset*sizeof(int)
  * \return *p
  */
 inline void *atomicFetchAndIncrement(void * const volatile * p, int offset,
@@ -155,18 +155,6 @@ inline void *atomicFetchAndIncrement(void * const volatile * p, int offset,
  * \}
  */
 
-#ifdef _ARCH_ARM7_LPC2000
-#include "core/atomic_ops_impl_arm7.h"
-#elif defined(_ARCH_CORTEXM3_STM32)   || defined(_ARCH_CORTEXM3_STM32F2) \
-   || defined(_ARCH_CORTEXM4_STM32F4) || defined(_ARCH_CORTEXM3_STM32L1) \
-   || defined(_ARCH_CORTEXM7_STM32F7) || defined(_ARCH_CORTEXM7_STM32H7) \
-   || defined(_ARCH_CORTEXM3_EFM32GG) || defined(_ARCH_CORTEXM4_STM32F3) \
-   || defined(_ARCH_CORTEXM4_STM32L4) || defined(_ARCH_CORTEXM4_ATSAM4L)
 #include "core/atomic_ops_impl_cortexMx.h"
-#elif defined(_ARCH_CORTEXM0_STM32)
-#include "core/atomic_ops_impl_cortexM0.h"
-#else
-#error "No atomic ops for this architecture"
-#endif
 
 #endif //ATOMIC_OPS_H

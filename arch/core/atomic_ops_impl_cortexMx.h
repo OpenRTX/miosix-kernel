@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2013 by Terraneo Federico                               *
+ *   Copyright (C) 2013, 2014, 2015 by Terraneo Federico                   *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -25,28 +25,83 @@
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  ***************************************************************************/
 
-#ifndef STAGE_2_BOOT_H
-#define	STAGE_2_BOOT_H
+#ifndef ATOMIC_OPS_IMPL_H
+#define	ATOMIC_OPS_IMPL_H
 
+#include "interfaces/arch_registers.h"
 
 namespace miosix {
 
-/**
- * \internal
- * This function will perform the part of system initialization that must be
- * done after the kernel is started. At the end, it will call main()
- * \param argv ignored parameter
- */
-void *mainLoader(void *argv);
+inline int atomicSwap(volatile int *p, int v)
+{
+    int result;
+    volatile uint32_t *ptr=reinterpret_cast<volatile uint32_t*>(p);
+    do {
+        result=__LDREXW(ptr);
+    } while(__STREXW(v,ptr));
+    asm volatile("":::"memory");
+    return result;
+}
+
+inline void atomicAdd(volatile int *p, int incr)
+{
+    int value;
+    volatile uint32_t *ptr=reinterpret_cast<volatile uint32_t*>(p);
+    do {
+        value=__LDREXW(ptr);
+    } while(__STREXW(value+incr,ptr));
+    asm volatile("":::"memory");
+}
+
+inline int atomicAddExchange(volatile int *p, int incr)
+{
+    int result;
+    volatile uint32_t *ptr=reinterpret_cast<volatile uint32_t*>(p);
+    do {
+        result=__LDREXW(ptr);
+    } while(__STREXW(result+incr,ptr));
+    asm volatile("":::"memory");
+    return result;
+}
+
+inline int atomicCompareAndSwap(volatile int *p, int prev, int next)
+{
+    int result;
+    volatile uint32_t *ptr=reinterpret_cast<volatile uint32_t*>(p);
+    do {
+        result=__LDREXW(ptr);
+        if(result!=prev)
+        {
+            __CLREX();
+            return result;
+        }
+    } while(__STREXW(next,ptr));
+    asm volatile("":::"memory");
+    return result;
+}
+
+inline void *atomicFetchAndIncrement(void * const volatile * p, int offset,
+        int incr)
+{
+    void *result;
+    volatile uint32_t *rcp;
+    int rc;
+    do {
+        for(;;)
+        {
+            result=*p;
+            if(result==0) return 0;
+            rcp=reinterpret_cast<uint32_t*>(result)+offset;
+            rc=__LDREXW(rcp);
+            asm volatile("":::"memory");
+            if(result==*p) break;
+            __CLREX();
+        }
+    } while(__STREXW(rc+incr,rcp));
+    asm volatile("":::"memory");
+    return result;
+}
 
 } //namespace miosix
 
-/**
- * \internal
- * Performs the part of initialization that must be done before the kernel is
- * started, and starts the kernel.
- * This function is called by the stage 1 boot which is architecture dependent.
- */
-extern "C" void _init();
-
-#endif //STAGE_2_BOOT_H
+#endif //ATOMIC_OPS_IMPL_H

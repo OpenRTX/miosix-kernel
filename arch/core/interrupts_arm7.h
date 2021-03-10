@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2013 by Terraneo Federico                               *
+ *   Copyright (C) 2008 by Terraneo Federico                               *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -23,30 +23,21 @@
  *                                                                         *
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
- ***************************************************************************/
+ ***************************************************************************/ 
 
-#ifndef STAGE_2_BOOT_H
-#define	STAGE_2_BOOT_H
+/***********************************************************************
+* interrupts.h Part of the Miosix Embedded OS.
+* Implementation of "Generic" interrupts, not related to a particular
+* hardware driver.
+************************************************************************/
 
+#ifndef INTERRUPTS_H
+#define INTERRUPTS_H
 
-namespace miosix {
+void default_IRQ_Routine()      __attribute__ ((interrupt("IRQ")));
+extern "C" void FIQ_Routine()   __attribute__ ((interrupt("FIQ")));
+extern "C" void UNDEF_Routine() __attribute__ ((interrupt("UNDEF")));
+extern "C" void DABT_Routine()  __attribute__ ((interrupt("DABT")));
+extern "C" void PABT_Routine()  __attribute__ ((interrupt("PABT")));
 
-/**
- * \internal
- * This function will perform the part of system initialization that must be
- * done after the kernel is started. At the end, it will call main()
- * \param argv ignored parameter
- */
-void *mainLoader(void *argv);
-
-} //namespace miosix
-
-/**
- * \internal
- * Performs the part of initialization that must be done before the kernel is
- * started, and starts the kernel.
- * This function is called by the stage 1 boot which is architecture dependent.
- */
-extern "C" void _init();
-
-#endif //STAGE_2_BOOT_H
+#endif //INTERRUPTS_H
