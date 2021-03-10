@@ -28,7 +28,7 @@
 #ifndef VERSION_H
 #define	VERSION_H
 
-namespace miosix {
+// namespace miosix {
 
 /**
  * \addtogroup Util
@@ -50,6 +50,6 @@ const char *getMiosixVersion();
  * \}
  */
 
-} //namespace miosix
+// } //namespace miosix
 
 #endif	/* VERSION_H */
