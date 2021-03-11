@@ -36,8 +36,6 @@
  */
 #define BOARD_SETTINGS_VERSION 100
 
-// namespace miosix {
-
 /**
  * \addtogroup Settings
  * \{
@@ -84,7 +82,5 @@ static const unsigned char sdVoltage=30; //Board powered @ 3.0V
 /**
  * \}
  */
-
-// } //namespace miosix
 
 #endif	/* BOARD_SETTINGS_H */
