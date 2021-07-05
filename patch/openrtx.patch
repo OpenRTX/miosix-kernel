@@ -1,6 +1,6 @@
-From ead692eb177cc83a0b193b49d78a10972efe61de Mon Sep 17 00:00:00 2001
+From ec87b8bc3fc8b2e3d3093003e48cc4db2ea6b135 Mon Sep 17 00:00:00 2001
 From: Silvano Seva <silseva@fastwebnet.it>
-Date: Mon, 5 Jul 2021 09:43:21 +0200
+Date: Mon, 5 Jul 2021 09:57:23 +0200
 Subject: [PATCH] OpenRTX patch
 
 ---
@@ -10,8 +10,9 @@ Subject: [PATCH] OpenRTX patch
  .../M4_openrtx/interfaces-impl/bsp_impl.h     |  63 +++++++++++
  .../M4_openrtx/board_settings.h               |  90 +++++++++++++++
  miosix/config/miosix_settings.h               |  14 +--
+ miosix/kernel/logging.h                       |   4 +-
  .../stdlib_integration/libc_integration.cpp   | 104 +++---------------
- 7 files changed, 219 insertions(+), 123 deletions(-)
+ 8 files changed, 221 insertions(+), 125 deletions(-)
  create mode 100644 miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h
  create mode 100644 miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/bsp_impl.h
  create mode 100644 miosix/config/arch/cortexM4_stm32f4/M4_openrtx/board_settings.h
@@ -416,6 +417,22 @@ index 45c2f4c..2f22f46 100644
  
  /// \def WITH_ERRLOG
  /// Uncomment for debug information on stdout.
+diff --git a/miosix/kernel/logging.h b/miosix/kernel/logging.h
+index 4b0ed67..9561c51 100644
+--- a/miosix/kernel/logging.h
++++ b/miosix/kernel/logging.h
+@@ -89,9 +89,9 @@ inline void errorLog(const char *fmt, ...)
+  * \param string to print
+  */
+ #ifdef WITH_ERRLOG
+-inline void IRQerrorLog(const char *string)
++extern "C"
+ {
+-    miosix::DefaultConsole::instance().IRQget()->IRQwrite(string);
++    extern void IRQerrorLog(const char *string);
+ }
+ #else //WITH_ERRLOG
+ #define IRQerrorLog(x) ;
 diff --git a/miosix/stdlib_integration/libc_integration.cpp b/miosix/stdlib_integration/libc_integration.cpp
 index 7a99231..fd0ff6d 100644
 --- a/miosix/stdlib_integration/libc_integration.cpp
