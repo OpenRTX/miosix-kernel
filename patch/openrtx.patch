@@ -1,16 +1,17 @@
-From bfb4e13ff1be38ddffa5c091a2760ee4b8e82d91 Mon Sep 17 00:00:00 2001
+From ead692eb177cc83a0b193b49d78a10972efe61de Mon Sep 17 00:00:00 2001
 From: Silvano Seva <silseva@fastwebnet.it>
-Date: Mon, 8 Mar 2021 15:30:38 +0100
+Date: Mon, 5 Jul 2021 09:43:21 +0200
 Subject: [PATCH] OpenRTX patch
 
 ---
  miosix/Makefile                               |   4 +-
+ .../arch/common/core/interrupts_cortexMx.cpp  |  54 ++++-----
  .../interfaces-impl/arch_registers_impl.h     |  13 +++
  .../M4_openrtx/interfaces-impl/bsp_impl.h     |  63 +++++++++++
  .../M4_openrtx/board_settings.h               |  90 +++++++++++++++
- miosix/config/miosix_settings.h               |  16 +--
+ miosix/config/miosix_settings.h               |  14 +--
  .../stdlib_integration/libc_integration.cpp   | 104 +++---------------
- 6 files changed, 193 insertions(+), 97 deletions(-)
+ 7 files changed, 219 insertions(+), 123 deletions(-)
  create mode 100644 miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h
  create mode 100644 miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/bsp_impl.h
  create mode 100644 miosix/config/arch/cortexM4_stm32f4/M4_openrtx/board_settings.h
@@ -30,6 +31,151 @@ index 95d8c79..5f4aa5d 100644
  include $(CONFPATH)/config/Makefile.inc
  
  ## List of all Miosix OS source files that have no special requirements
+diff --git a/miosix/arch/common/core/interrupts_cortexMx.cpp b/miosix/arch/common/core/interrupts_cortexMx.cpp
+index dd05ebd..9a2d926 100644
+--- a/miosix/arch/common/core/interrupts_cortexMx.cpp
++++ b/miosix/arch/common/core/interrupts_cortexMx.cpp
+@@ -78,7 +78,7 @@ static unsigned int getProgramCounter()
+ 
+ void NMI_Handler()
+ {
+-    IRQerrorLog("\r\n***Unexpected NMI\r\n");
++    IRQerrorLog("Unexpected NMI");
+     miosix_private::IRQsystemReboot();
+ }
+ 
+@@ -97,14 +97,14 @@ void __attribute__((noinline)) HardFault_impl()
+         HARDFAULT,getProgramCounter()))) return;
+     #endif //WITH_PROCESSES
+     #ifdef WITH_ERRLOG
+-    IRQerrorLog("\r\n***Unexpected HardFault @ ");
++    IRQerrorLog("Unexpected HardFault @ ");
+     printUnsignedInt(getProgramCounter());
+     #ifndef _ARCH_CORTEXM0
+     unsigned int hfsr=SCB->HFSR;
+     if(hfsr & 0x40000000) //SCB_HFSR_FORCED
+-        IRQerrorLog("Fault escalation occurred\r\n");
++        IRQerrorLog("Fault escalation occurred");
+     if(hfsr & 0x00000002) //SCB_HFSR_VECTTBL
+-        IRQerrorLog("A BusFault occurred during a vector table read\r\n");
++        IRQerrorLog("A BusFault occurred during a vector table read");
+     #endif //_ARCH_CORTEXM0
+     #endif //WITH_ERRLOG
+     miosix_private::IRQsystemReboot();
+@@ -140,21 +140,21 @@ void __attribute__((noinline)) MemManage_impl()
+     }
+     #endif //WITH_PROCESSES
+     #ifdef WITH_ERRLOG
+-    IRQerrorLog("\r\n***Unexpected MemManage @ ");
++    IRQerrorLog("Unexpected MemManage @ ");
+     printUnsignedInt(getProgramCounter());
+     if(cfsr & 0x00000080) //SCB_CFSR_MMARVALID
+     {
+         IRQerrorLog("Fault caused by attempted access to ");
+         printUnsignedInt(SCB->MMFAR);
+-    } else IRQerrorLog("The address that caused the fault is missing\r\n");
++    } else IRQerrorLog("The address that caused the fault is missing");
+     if(cfsr & 0x00000010) //SCB_CFSR_MSTKERR
+-        IRQerrorLog("Fault occurred during exception stacking\r\n");
++        IRQerrorLog("Fault occurred during exception stacking");
+     if(cfsr & 0x00000008) //SCB_CFSR_MUNSTKERR
+-        IRQerrorLog("Fault occurred during exception unstacking\r\n");
++        IRQerrorLog("Fault occurred during exception unstacking");
+     if(cfsr & 0x00000002) //SCB_CFSR_DACCVIOL
+-        IRQerrorLog("Fault was caused by invalid PC\r\n");
++        IRQerrorLog("Fault was caused by invalid PC");
+     if(cfsr & 0x00000001) //SCB_CFSR_IACCVIOL
+-        IRQerrorLog("Fault was caused by attempted execution from XN area\r\n");
++        IRQerrorLog("Fault was caused by attempted execution from XN area");
+     #endif //WITH_ERRLOG
+     miosix_private::IRQsystemReboot();
+ }
+@@ -184,23 +184,23 @@ void __attribute__((noinline)) BusFault_impl()
+     }
+     #endif //WITH_PROCESSES
+     #ifdef WITH_ERRLOG
+-    IRQerrorLog("\r\n***Unexpected BusFault @ ");
++    IRQerrorLog("Unexpected BusFault @ ");
+     printUnsignedInt(getProgramCounter());
+     if(cfsr & 0x00008000) //SCB_CFSR_BFARVALID
+     {
+         IRQerrorLog("Fault caused by attempted access to ");
+         printUnsignedInt(SCB->BFAR);
+-    } else IRQerrorLog("The address that caused the fault is missing\r\n");
++    } else IRQerrorLog("The address that caused the fault is missing");
+     if(cfsr & 0x00001000) //SCB_CFSR_STKERR
+-        IRQerrorLog("Fault occurred during exception stacking\r\n");
++        IRQerrorLog("Fault occurred during exception stacking");
+     if(cfsr & 0x00000800) //SCB_CFSR_UNSTKERR
+-        IRQerrorLog("Fault occurred during exception unstacking\r\n");
++        IRQerrorLog("Fault occurred during exception unstacking");
+     if(cfsr & 0x00000400) //SCB_CFSR_IMPRECISERR
+-        IRQerrorLog("Fault is imprecise\r\n");
++        IRQerrorLog("Fault is imprecise");
+     if(cfsr & 0x00000200) //SCB_CFSR_PRECISERR
+-        IRQerrorLog("Fault is precise\r\n");
++        IRQerrorLog("Fault is precise");
+     if(cfsr & 0x00000100) //SCB_CFSR_IBUSERR
+-        IRQerrorLog("Fault happened during instruction fetch\r\n");
++        IRQerrorLog("Fault happened during instruction fetch");
+     #endif //WITH_ERRLOG
+     miosix_private::IRQsystemReboot();
+ }
+@@ -235,20 +235,20 @@ void __attribute__((noinline)) UsageFault_impl()
+     }
+     #endif //WITH_PROCESSES
+     #ifdef WITH_ERRLOG
+-    IRQerrorLog("\r\n***Unexpected UsageFault @ ");
++    IRQerrorLog("Unexpected UsageFault @ ");
+     printUnsignedInt(getProgramCounter());
+     if(cfsr & 0x02000000) //SCB_CFSR_DIVBYZERO
+-        IRQerrorLog("Divide by zero\r\n");
++        IRQerrorLog("Divide by zero");
+     if(cfsr & 0x01000000) //SCB_CFSR_UNALIGNED
+-        IRQerrorLog("Unaligned memory access\r\n");
++        IRQerrorLog("Unaligned memory access");
+     if(cfsr & 0x00080000) //SCB_CFSR_NOCP
+-        IRQerrorLog("Attempted coprocessor access\r\n");
++        IRQerrorLog("Attempted coprocessor access");
+     if(cfsr & 0x00040000) //SCB_CFSR_INVPC
+-        IRQerrorLog("EXC_RETURN not expected now\r\n");
++        IRQerrorLog("EXC_RETURN not expected now");
+     if(cfsr & 0x00020000) //SCB_CFSR_INVSTATE
+-        IRQerrorLog("Invalid EPSR usage\r\n");
++        IRQerrorLog("Invalid EPSR usage");
+     if(cfsr & 0x00010000) //SCB_CFSR_UNDEFINSTR
+-        IRQerrorLog("Undefined instruction\r\n");
++        IRQerrorLog("Undefined instruction");
+     #endif //WITH_ERRLOG
+     miosix_private::IRQsystemReboot();
+ }
+@@ -256,7 +256,7 @@ void __attribute__((noinline)) UsageFault_impl()
+ void DebugMon_Handler()
+ {
+     #ifdef WITH_ERRLOG
+-    IRQerrorLog("\r\n***Unexpected DebugMon @ ");
++    IRQerrorLog("Unexpected DebugMon @ ");
+     printUnsignedInt(getProgramCounter());
+     #endif //WITH_ERRLOG
+     miosix_private::IRQsystemReboot();
+@@ -267,7 +267,7 @@ void DebugMon_Handler()
+ void PendSV_Handler()
+ {
+     #ifdef WITH_ERRLOG
+-    IRQerrorLog("\r\n***Unexpected PendSV @ ");
++    IRQerrorLog("Unexpected PendSV @ ");
+     printUnsignedInt(getProgramCounter());
+     #endif //WITH_ERRLOG
+     miosix_private::IRQsystemReboot();
+@@ -276,7 +276,7 @@ void PendSV_Handler()
+ void unexpectedInterrupt()
+ {
+     #ifdef WITH_ERRLOG
+-    IRQerrorLog("\r\n***Unexpected Peripheral interrupt\r\n");
++    IRQerrorLog("Unexpected Peripheral interrupt");
+     #endif //WITH_ERRLOG
+     miosix_private::IRQsystemReboot();
+ }
 diff --git a/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h b/miosix/arch/cortexM4_stm32f4/M4_openrtx/interfaces-impl/arch_registers_impl.h
 new file mode 100644
 index 0000000..6f6d8a7
@@ -215,7 +361,7 @@ index 0000000..d33881a
 +
 +#endif	/* BOARD_SETTINGS_H */
 diff --git a/miosix/config/miosix_settings.h b/miosix/config/miosix_settings.h
-index 45c2f4c..76ee6ee 100644
+index 45c2f4c..2f22f46 100644
 --- a/miosix/config/miosix_settings.h
 +++ b/miosix/config/miosix_settings.h
 @@ -24,7 +24,7 @@
@@ -261,7 +407,7 @@ index 45c2f4c..76ee6ee 100644
  
  /// Maximum number of open files. Trying to open more will fail.
  /// Cannot be lower than 3, as the first three are stdin, stdout, stderr
-@@ -130,12 +130,12 @@ const unsigned char MAX_OPEN_FILES=8;
+@@ -130,7 +130,7 @@ const unsigned char MAX_OPEN_FILES=8;
  /// \def WITH_BOOTLOG
  /// Uncomment to print bootlogs on stdout.
  /// By default it is defined (bootlogs are printed)
@@ -270,14 +416,8 @@ index 45c2f4c..76ee6ee 100644
  
  /// \def WITH_ERRLOG
  /// Uncomment for debug information on stdout.
- /// By default it is defined (error information is printed)
--#define WITH_ERRLOG
-+// #define WITH_ERRLOG
- 
- 
- 
 diff --git a/miosix/stdlib_integration/libc_integration.cpp b/miosix/stdlib_integration/libc_integration.cpp
-index a4f39db..5d8e3be 100644
+index 7a99231..fd0ff6d 100644
 --- a/miosix/stdlib_integration/libc_integration.cpp
 +++ b/miosix/stdlib_integration/libc_integration.cpp
 @@ -191,7 +191,7 @@ void *_sbrk_r(struct _reent *ptr, ptrdiff_t incr)
@@ -499,7 +639,7 @@ index a4f39db..5d8e3be 100644
   */
  
  #ifndef _MIOSIX_GCC_PATCH_MAJOR //Before GCC 9.2.0
-@@ -977,7 +905,7 @@ clock_t _times_r(struct _reent *ptr, struct tms *tim)
+@@ -992,7 +920,7 @@ clock_t _times_r(struct _reent *ptr, struct tms *tim)
      if(clock_gettime(CLOCK_MONOTONIC,&tp)) return static_cast<clock_t>(-1);
      constexpr int divFactor=1000000000/CLOCKS_PER_SEC;
      clock_t utime=tp.tv_sec*CLOCKS_PER_SEC + tp.tv_nsec/divFactor;
@@ -509,5 +649,5 @@ index a4f39db..5d8e3be 100644
      //unsigned, so if we return tim.utime and someone calls _times_r in an
      //unlucky moment where tim.utime is 0xffffffff it would be interpreted as -1
 -- 
-2.30.1
+2.32.0
 
