@@ -1,0 +1,47 @@
+
+name: release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build_release:
+    name: build_release
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: install deps
+        run: apt update && apt install -y build-essential wget unzip m4 gcc g++ zip make libncurses5-dev byacc flex texinfo patch tar unzip lzip libelf-dev perl libexpat1-dev sudo
+      - name: download sources
+        run: cd miosix/_tools/compiler/gcc-9.2.0-mp3.1/ && bash download.sh && mkdir -p /opt/
+      - name: build artifacts
+        run: cd miosix/_tools/compiler/gcc-9.2.0-mp3.1/ && bash install-script.sh
+      - name: pack artifacts
+        run: cd /opt/ && zip -r miosix-toolchain.zip arm-miosix-eabi/
+      - name: release
+        uses: actions/create-release@v1
+        id: create_release
+        with:
+          draft: false
+          prerelease: false
+          release_name: Release ${{ github.ref }}
+          tag_name: ${{ github.ref }}
+          body: |
+            Changes:
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: upload linux artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: /opt/miosix-toolchain.zip
+          asset_name: miosix-toolchain.zip
+          asset_content_type: application/gzip
+  
