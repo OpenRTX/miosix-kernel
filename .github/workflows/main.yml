@@ -1,10 +1,6 @@
-
 name: release
 
-on:
-  push:
-    tags:
-      - '*'
+on: workflow_dispatch
 
 jobs:
   build_release:
@@ -16,21 +12,21 @@ jobs:
         with:
           fetch-depth: 0
       - name: install deps
-        run: apt update && apt install -y build-essential wget unzip m4 gcc g++ zip make libncurses5-dev byacc flex texinfo patch tar unzip lzip libelf-dev perl libexpat1-dev sudo
+        run: sudo apt update && sudo apt install -y build-essential wget unzip m4 gcc g++ zip make libncurses5-dev byacc flex texinfo patch tar unzip lzip libelf-dev perl libexpat1-dev sudo
       - name: download sources
-        run: cd miosix/_tools/compiler/gcc-9.2.0-mp3.1/ && bash download.sh && mkdir -p /opt/
+        run: cd miosix/_tools/compiler/gcc-9.2.0-mp3.1/ && bash download.sh && sudo mkdir -p /opt/
       - name: build artifacts
-        run: cd miosix/_tools/compiler/gcc-9.2.0-mp3.1/ && bash install-script.sh
+        run: cd miosix/_tools/compiler/gcc-9.2.0-mp3.1/ && sudo bash install-script.sh
       - name: pack artifacts
-        run: cd /opt/ && zip -r miosix-toolchain.zip arm-miosix-eabi/
+        run: cd /opt/ && sudo tar -I 'xz -9' -cvf miosix-toolchain.tar.xz arm-miosix-eabi/
       - name: release
         uses: actions/create-release@v1
         id: create_release
         with:
           draft: false
           prerelease: false
-          release_name: Release ${{ github.ref }}
-          tag_name: ${{ github.ref }}
+          release_name: Release v2.21.1
+          tag_name: v2.21.1
           body: |
             Changes:
         env:
@@ -41,7 +37,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: /opt/miosix-toolchain.zip
-          asset_name: miosix-toolchain.zip
-          asset_content_type: application/gzip
-  
+          asset_path: /opt/miosix-toolchain.tar.xz
+          asset_name: miosix-toolchain.tar.xz
+          asset_content_type: application/octet-stream
+
