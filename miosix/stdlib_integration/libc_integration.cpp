@@ -120,6 +120,11 @@ extern "C" {
  */
 int __register_exitproc(int type, void (*fn)(void), void *arg, void *d)
 {
+    (void) type;
+    (void) fn;
+    (void) arg;
+    (void) d;
+
     return 0;
 }
 
@@ -128,7 +133,11 @@ int __register_exitproc(int type, void (*fn)(void), void *arg, void *d)
  * \param code the exit code, for example with exit(1), code==1
  * \param d __dso_handle, see __register_exitproc
  */
-void __call_exitprocs(int code, void *d) {}
+void __call_exitprocs(int code, void *d)
+{
+    (void) code;
+    (void) d;
+}
 
 /**
  * \internal
@@ -150,6 +159,8 @@ void *__dso_handle=(void*) &__dso_handle;
  */
 void _exit(int n)
 {
+    (void) n;
+
     miosix::reboot();
     //Never reach here
     for(;;) ; //Required to avoid a warning about noreturn functions
@@ -161,6 +172,8 @@ void _exit(int n)
  */
 void *_sbrk_r(struct _reent *ptr, ptrdiff_t incr)
 {
+    (void) ptr;
+
     //This is the absolute start of the heap
     extern char _end asm("_end"); //defined in the linker script
     //This is the absolute end of the heap
@@ -262,6 +275,10 @@ int _open_r(struct _reent *ptr, const char *name, int flags, int mode)
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void) name;
+    (void) flags;
+    (void) mode;
+
     ptr->_errno=ENFILE;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -303,6 +320,7 @@ int _close_r(struct _reent *ptr, int fd)
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void) fd;
     ptr->_errno=EBADF;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -347,6 +365,9 @@ off_t _lseek_r(struct _reent *ptr, int fd, off_t pos, int whence)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) fd;
+    (void) pos;
+    (void) whence;
     ptr->_errno=EBADF;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -424,6 +445,8 @@ int _stat_r(struct _reent *ptr, const char *file, struct stat *pstat)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) file;
+    (void) pstat;
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -457,6 +480,7 @@ int _isatty_r(struct _reent *ptr, int fd)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) ptr;
     switch(fd)
     {
         case STDIN_FILENO:
@@ -497,6 +521,9 @@ int _fcntl_r(struct _reent *ptr, int fd, int cmd, int opt)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) fd;
+    (void) cmd;
+    (void) opt;
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -585,6 +612,8 @@ char *_getcwd_r(struct _reent *ptr, char *buf, size_t size)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) buf;
+    (void) size;
     ptr->_errno=ENOENT;
     return NULL;
     #endif //WITH_FILESYSTEM
@@ -618,6 +647,7 @@ int _chdir_r(struct _reent *ptr, const char *path)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) path;
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -651,6 +681,8 @@ int _mkdir_r(struct _reent *ptr, const char *path, int mode)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) path;
+    (void) mode;
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -684,6 +716,7 @@ int _rmdir_r(struct _reent *ptr, const char *path)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) path;
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -700,6 +733,8 @@ int rmdir(const char *path)
  */
 int _link_r(struct _reent *ptr, const char *f_old, const char *f_new)
 {
+    (void) f_old;
+    (void) f_new;
     ptr->_errno=ENOENT; //Unimplemented at the moment
     return -1;
 }
@@ -732,6 +767,7 @@ int _unlink_r(struct _reent *ptr, const char *file)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) file;
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -765,6 +801,8 @@ int _rename_r(struct _reent *ptr, const char *f_old, const char *f_new)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) f_old;
+    (void) f_new;
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -798,6 +836,9 @@ int getdents(unsigned int fd, struct dirent *dirp, unsigned int count)
     #endif //__NO_EXCEPTIONS
     
     #else //WITH_FILESYSTEM
+    (void) fd;
+    (void) dirp;
+    (void) count;
     miosix::getReent()->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -879,6 +920,9 @@ inline void ll2timespec(long long tick, struct timespec *tp)
 
 int clock_gettime(clockid_t clock_id, struct timespec *tp)
 {
+    (void) clock_id;
+    (void) tp;
+
     if(tp==nullptr) return -1;
     //TODO: support CLOCK_REALTIME
     ll2timespec(miosix::getTick(),tp);
@@ -887,12 +931,17 @@ int clock_gettime(clockid_t clock_id, struct timespec *tp)
 
 int clock_settime(clockid_t clock_id, const struct timespec *tp)
 {
+    (void) clock_id;
+    (void) tp;
+
     //TODO: support CLOCK_REALTIME
     return -1;
 }
 
 int clock_getres(clockid_t clock_id, struct timespec *res)
 {
+    (void) clock_id;
+
     if(res==nullptr) return -1;
     res->tv_sec=0;
     res->tv_nsec=tickNsFactor;
@@ -902,6 +951,9 @@ int clock_getres(clockid_t clock_id, struct timespec *res)
 int clock_nanosleep(clockid_t clock_id, int flags,
                     const struct timespec *req, struct timespec *rem)
 {
+    (void) clock_id;
+    (void) rem;
+
     if(req==nullptr) return -1;
     //TODO: support CLOCK_REALTIME
     long long timeTick=timespec2ll(req);
@@ -916,6 +968,8 @@ int clock_nanosleep(clockid_t clock_id, int flags,
  */
 clock_t _times_r(struct _reent *ptr, struct tms *tim)
 {
+    (void) ptr;
+
     struct timespec tp;
     //No CLOCK_PROCESS_CPUTIME_ID support, use CLOCK_MONOTONIC
     if(clock_gettime(CLOCK_MONOTONIC,&tp)) return static_cast<clock_t>(-1);
@@ -943,6 +997,8 @@ clock_t times(struct tms *tim)
 
 int _gettimeofday_r(struct _reent *ptr, struct timeval *tv, void *tz)
 {
+    (void) ptr;
+
     if(tv==nullptr || tz!=nullptr) return -1;
     struct timespec tp;
     if(clock_gettime(CLOCK_REALTIME,&tp)) return -1;
@@ -972,6 +1028,9 @@ int nanosleep(const struct timespec *req, struct timespec *rem)
  */
 int _kill_r(struct _reent* ptr, int pid, int sig)
 {
+    (void) ptr;
+    (void) sig;
+
     if(pid==0) _exit(1); //pid=1 means the only running process
     else return -1;
 }
@@ -987,6 +1046,8 @@ int kill(int pid, int sig)
  */
 int _getpid_r(struct _reent* ptr)
 {
+    (void) ptr;
+
     return 0;
 }
 
@@ -1005,6 +1066,9 @@ int getpid()
  */
 int _wait_r(struct _reent *ptr, int *status)
 {
+    (void) ptr;
+    (void) status;
+
     return -1;
 }
 
@@ -1020,6 +1084,11 @@ int wait(int *status)
 int _execve_r(struct _reent *ptr, const char *path, char *const argv[],
         char *const env[])
 {
+    (void) ptr;
+    (void) path;
+    (void) argv;
+    (void) env;
+
     return -1;
 }
 
@@ -1035,6 +1104,11 @@ int execve(const char *path, char *const argv[], char *const env[])
 pid_t _forkexecve_r(struct _reent *ptr, const char *path, char *const argv[],
         char *const env[])
 {
+    (void) ptr;
+    (void) path;
+    (void) argv;
+    (void) env;
+
     return -1;
 }
 

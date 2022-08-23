@@ -117,6 +117,7 @@ int pthread_attr_init(pthread_attr_t *attr)
 
 int pthread_attr_destroy(pthread_attr_t *attr)
 {
+    (void) attr;
     return 0; //That was easy
 }
 
@@ -196,6 +197,7 @@ int	pthread_mutexattr_init(pthread_mutexattr_t *attr)
 
 int	pthread_mutexattr_destroy(pthread_mutexattr_t *attr)
 {
+    (void) attr;
     return 0; //Do nothing
 }
 
@@ -285,6 +287,7 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)
 int pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr)
 {
     //attr is currently not considered
+    (void) attr;
     cond->first=0;
     //No need to initialize cond->last
     return 0;
@@ -415,6 +418,12 @@ int pthread_once(pthread_once_t *once, void (*func)())
     return 0;
 }
 
-int pthread_setcancelstate(int state, int *oldstate) { return 0; } //Stub
+int pthread_setcancelstate(int state, int *oldstate)
+{
+    //Stub
+    (void) state;
+    (void) oldstate;
+    return 0;
+}
 
 } //extern "C"
