@@ -313,82 +313,11 @@ int close(int fd)
     return _close_r(miosix::getReent(),fd);
 }
 
-/**
- * \internal
- * _write_r, write to a file
- */
-int _write_r(struct _reent *ptr, int fd, const void *buf, size_t cnt)
-{    
-    #ifdef WITH_FILESYSTEM
-
-    #ifndef __NO_EXCEPTIONS
-    try {
-    #endif //__NO_EXCEPTIONS
-        int result=miosix::getFileDescriptorTable().write(fd,buf,cnt);
-        if(result>=0) return result;
-        ptr->_errno=-result;
-        return -1;
-    #ifndef __NO_EXCEPTIONS
-    } catch(exception& e) {
-        ptr->_errno=ENOMEM;
-        return -1;
-    }
-    #endif //__NO_EXCEPTIONS
-    
-    #else //WITH_FILESYSTEM
-    if(fd==STDOUT_FILENO || fd==STDERR_FILENO)
-    {
-        int result=miosix::DefaultConsole::instance().getTerminal()->write(buf,cnt);
-        if(result>=0) return result;
-        ptr->_errno=-result;
-        return -1;
-    } else {
-        ptr->_errno=EBADF;
-        return -1;
-    }
-    #endif //WITH_FILESYSTEM
-}
-
 int write(int fd, const void *buf, size_t cnt)
 {
     return _write_r(miosix::getReent(),fd,buf,cnt);
 }
 
-/**
- * \internal
- * _read_r, read from a file
- */
-int _read_r(struct _reent *ptr, int fd, void *buf, size_t cnt)
-{
-    #ifdef WITH_FILESYSTEM
-
-    #ifndef __NO_EXCEPTIONS
-    try {
-    #endif //__NO_EXCEPTIONS
-        int result=miosix::getFileDescriptorTable().read(fd,buf,cnt);
-        if(result>=0) return result;
-        ptr->_errno=-result;
-        return -1;
-    #ifndef __NO_EXCEPTIONS
-    } catch(exception& e) {
-        ptr->_errno=ENOMEM;
-        return -1;
-    }
-    #endif //__NO_EXCEPTIONS
-    
-    #else //WITH_FILESYSTEM
-    if(fd==STDIN_FILENO)
-    {
-        int result=miosix::DefaultConsole::instance().getTerminal()->read(buf,cnt);
-        if(result>=0) return result;
-        ptr->_errno=-result;
-        return -1;
-    } else {
-        ptr->_errno=EBADF;
-        return -1;
-    }
-    #endif //WITH_FILESYSTEM
-}
 
 int read(int fd, void *buf, size_t cnt)
 {

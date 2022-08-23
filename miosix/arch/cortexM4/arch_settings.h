@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2010 by Terraneo Federico                               *
+ *   Copyright (C) 2015-2020 by Terraneo Federico                          *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -25,34 +25,32 @@
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  ***************************************************************************/
 
-#ifndef ARCH_REGISTERS_H
-#define	ARCH_REGISTERS_H
+#pragma once
+
+namespace miosix {
 
 /**
- * \addtogroup Interfaces
+ * \addtogroup Settings
  * \{
  */
 
-/**
- * \file arch_registers.h
- * This file should contain the list of hardware registers of the selected
- * architecture, to allow application to directly access the hardware.
- *
- * The list of these registers is usually provided by the chip vendor in the
- * form of one or more header files.
- *
- * To include these registers in a portable way, here we only include
- * arch_registers_impl.h, which will be an header file in
- * arch/arch name/board name/interfaces_impl
- *
- * The usual implementation of arch_registers_impl.h is simply to include
- * the header files provided by the chip vendor.
- */
+/// \internal Size of vector to store registers during ctx switch (9*4=36Bytes)
+/// Only sp and r4-r11 are saved here, since r0-r3,r12,lr,pc,xPSR and
+/// old sp are saved by hardware on the process stack on Cortex CPUs.
+const unsigned char CTXSAVE_SIZE=9;
+
+/// \internal some architectures save part of the context on their stack.
+/// This constant is used to increase the stack size by the size of context
+/// save frame. If zero, this architecture does not save anything on stack
+/// during context save. Size is in bytes, not words.
+/// MUST be divisible by 4.
+const unsigned int CTXSAVE_ON_STACK=32;
+
+/// \internal stack alignment for this specific architecture
+const unsigned int CTXSAVE_STACK_ALIGNMENT=8;
 
 /**
  * \}
  */
 
-#include "arch_registers_impl.h"
-
-#endif //ARCH_REGISTERS_H
+} //namespace miosix
