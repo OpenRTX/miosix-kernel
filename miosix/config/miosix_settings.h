@@ -32,7 +32,7 @@
 // The PARSING_FROM_IDE is because Netbeans gets confused by this, it is never
 // defined when compiling the code.
 #ifndef PARSING_FROM_IDE
-#error This error is a reminder that you have not edited miosix_settings.h yet.
+// #error This error is a reminder that you have not edited miosix_settings.h yet.
 #endif //PARSING_FROM_IDE
 
 /**
@@ -88,17 +88,17 @@ namespace miosix {
 /// \def WITH_FILESYSTEM
 /// Allows to enable/disable filesystem support to save code size
 /// By default it is defined (filesystem support is enabled)
-#define WITH_FILESYSTEM
+// #define WITH_FILESYSTEM
 
 /// \def WITH_DEVFS
 /// Allows to enable/disable DevFs support to save code size
 /// By default it is defined (DevFs is enabled)
-#define WITH_DEVFS
+// #define WITH_DEVFS
 
 /// \def WITH_FATFS
 /// Allows to enable/disable FATFS support to save code size
 /// By default it is defined (FATFS is enabled)
-#define WITH_FATFS
+// #define WITH_FATFS
 /// Maxium number of files that can be opened on a mounted FATFS partition.
 /// Must be greater than 0
 constexpr unsigned char FATFS_MAX_OPEN_FILES=8;
@@ -155,12 +155,12 @@ const unsigned char MAX_OPEN_FILES=8;
 /// \def WITH_BOOTLOG
 /// Uncomment to print bootlogs on stdout.
 /// By default it is defined (bootlogs are printed)
-#define WITH_BOOTLOG
+// #define WITH_BOOTLOG
 
 /// \def WITH_ERRLOG
 /// Uncomment for debug information on stdout.
 /// By default it is defined (error information is printed)
-#define WITH_ERRLOG
+// #define WITH_ERRLOG
 
 
 
