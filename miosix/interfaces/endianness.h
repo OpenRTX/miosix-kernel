@@ -35,7 +35,8 @@
    || defined(_ARCH_CORTEXM7_STM32H7) || defined(_ARCH_CORTEXM3_EFM32GG) \
    || defined(_ARCH_CORTEXM4_STM32F3) || defined(_ARCH_CORTEXM4_STM32L4) \
    || defined(_ARCH_CORTEXM4_ATSAM4L) || defined(_ARCH_CORTEXM3_EFM32G) \
-   || defined(_ARCH_CORTEXM0PLUS_STM32L0) || defined(_ARCH_CORTEXM0PLUS_RP2040)
+   || defined(_ARCH_CORTEXM0PLUS_STM32L0) || defined(_ARCH_CORTEXM0PLUS_RP2040) \
+   || defined(_ARCH_CORTEXM4_MK22)
 #include "core/endianness_impl_cortexMx.h"
 #else
 #error "No endianness code for this architecture"

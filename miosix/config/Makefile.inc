@@ -3332,6 +3332,47 @@ else ifeq ($(ARCH),cortexM0plus_rp2040)
     arch/common/core/rp2040_os_timer.cpp                     \
     arch/common/drivers/rp2040_serial.cpp                    \
     arch/common/CMSIS/Device/RaspberryPi/RP2040/Source/system_RP2040.c
+##-----------------------------------------------------------------------------
+## ARCHITECTURE: cortexM4_mk22
+##
+else ifeq ($(ARCH),cortexM4_mk22)
+    ## Base directory with else header files for this board
+    ARCH_INC := arch/cortexM4_mk22/common
+
+
+    ##-------------------------------------------------------------------------
+    ## End of board list
+    ##
+    endif
+
+    ## Select compiler
+    PREFIX := arm-miosix-eabi-
+    ## This architecture does not support processes
+    #POSTLD :=
+
+    ## Select appropriate compiler flags for both ASM/C/C++/linker
+    CPU := -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16
+    AFLAGS_BASE   := $(CPU)
+    CFLAGS_BASE   += -D_ARCH_CORTEXM4_MK22 $(CLOCK_FREQ) $(XRAM) $(SRAM_BOOT) \
+                     $(CPU) $(OPT_OPTIMIZATION) -c
+    CXXFLAGS_BASE += -D_ARCH_CORTEXM4_MK22 $(CLOCK_FREQ) $(XRAM) $(SRAM_BOOT) \
+                     $(CPU) $(OPT_OPTIMIZATION) $(OPT_EXCEPT) -c
+    LFLAGS_BASE   := $(CPU) -Wl,--gc-sections,-Map,main.map        \
+                     -Wl,-T$(KPATH)/$(LINKER_SCRIPT) $(OPT_EXCEPT) \
+                     $(OPT_OPTIMIZATION) -nostdlib
+
+    ## Select architecture specific files
+    ## These are the files in arch/<arch name>/common
+
+    ARCH_SRC +=                                    \
+    arch/common/core/interrupts_cortexMx.cpp       \
+    arch/common/core/mpu_cortexMx.cpp              \
+    arch/common/drivers/dcc.cpp                    \
+    $(ARCH_INC)/interfaces-impl/portability.cpp    \
+    $(ARCH_INC)/interfaces-impl/delays.cpp         \
+    arch/common/drivers/mk22_gpio.cpp              \
+    arch/common/core/mk22_os_timer.cpp             \
+    arch/common/CMSIS/Device/NXP/MK22FN512xxx12/Source/system_MK22F51212.c
 
 ##-----------------------------------------------------------------------------
 ## end of architecture list
