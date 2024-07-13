@@ -101,6 +101,8 @@ static ProcessBase *kernel=nullptr;
  */
 void *idleThread(void *argv)
 {
+    (void)argv;
+
     for(;;)
     {
         if(existDeleted)
@@ -327,6 +329,8 @@ Memory layout for a thread
     |------------------------|<-- base, watermark
 */
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
 Thread *Thread::create(void *(*startfunc)(void *), unsigned int stacksize,
                        Priority priority, void *argv, unsigned short options)
 {
@@ -354,6 +358,7 @@ Thread *Thread::create(void *(*startfunc)(void *), unsigned int stacksize,
     #endif //SCHED_TYPE_EDF
     return thread;
 }
+#pragma GCC diagnostic pop
 
 Thread *Thread::create(void (*startfunc)(void *), unsigned int stacksize,
                        Priority priority, void *argv, unsigned short options)

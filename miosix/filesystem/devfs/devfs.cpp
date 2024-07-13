@@ -83,7 +83,7 @@ public:
      * case of errors
      */
     virtual ssize_t read(void *data, size_t len);
-    
+
     /**
      * Move file pointer, if the file supports random-access.
      * \param pos offset to sum to the beginning of the file, current position
@@ -100,21 +100,21 @@ public:
      * \return 0 on success, or a negative number on failure
      */
     virtual int ftruncate(off_t size);
-    
+
     /**
      * Return file information.
      * \param pstat pointer to stat struct
      * \return 0 on success, or a negative number on failure
      */
     virtual int fstat(struct stat *pstat) const;
-    
+
     /**
      * Check whether the file refers to a terminal.
      * \return 1 if it is a terminal, 0 if it is not, or a negative number in
      * case of errors
      */
     virtual int isatty() const;
-    
+
     /**
      * Perform various operations on a file descriptor
      * \param cmd specifies the operation to perform
@@ -151,7 +151,7 @@ ssize_t DevFsFile::read(void *data, size_t len)
 off_t DevFsFile::lseek(off_t pos, int whence)
 {
     if(flags & _NOSEEK) return -EBADF; //No seek support
-    
+
     off_t newSeekPoint=seekPoint;
     switch(whence)
     {
@@ -215,19 +215,30 @@ int Device::isatty() const
 
 ssize_t Device::readBlock(void *buffer, size_t size, off_t where)
 {
+    (void) where;
+
     memset(buffer,0,size); //Act as /dev/zero
     return size;
 }
 
 ssize_t Device::writeBlock(const void *buffer, size_t size, off_t where)
 {
+    (void) buffer;
+    (void) where;
+
     return size; //Act as /dev/null
 }
 
-void Device::IRQwrite(const char *str) {}
+void Device::IRQwrite(const char *str)
+{
+    (void) str;
+}
 
 int Device::ioctl(int cmd, void *arg)
 {
+    (void) cmd;
+    (void) arg;
+
     return -ENOTTY; //Means the operation does not apply to this descriptor
 }
 
@@ -236,7 +247,7 @@ Device::~Device() {}
 #ifdef WITH_DEVFS
 
 /**
- * Directory class for DevFs 
+ * Directory class for DevFs
  */
 class DevFsDirectory : public DirectoryBase
 {
@@ -285,7 +296,7 @@ int DevFsDirectory::getdents(void *dp, int len)
 {
     if(len<minimumBufferSize) return -EINVAL;
     if(last) return 0;
-    
+
     Lock<FastMutex> l(mutex);
     char *begin=reinterpret_cast<char*>(dp);
     char *buffer=begin;

@@ -193,7 +193,7 @@ public:
 };
 
 static STM32Timer<TIMER_HW_CLASS> timer;
-DEFAULT_OS_TIMER_INTERFACE_IMPLMENTATION(timer);
+DEFAULT_OS_TIMER_INTERFACE_IMPLMENTATION(timer)
 } //namespace miosix
 
 void __attribute__((naked)) IRQ_HANDLER_NAME()

@@ -23,7 +23,7 @@
  *                                                                         *
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
- ***************************************************************************/ 
+ ***************************************************************************/
 
 #include "sync.h"
 #include "kernel.h"
@@ -177,6 +177,8 @@ void Mutex::PKlockToDepth(PauseKernelLock& dLock, unsigned int depth)
 
 bool Mutex::PKtryLock(PauseKernelLock& dLock)
 {
+    (void)dLock;
+
     Thread *p=Thread::PKgetCurrentThread();
     if(owner==nullptr)
     {
@@ -199,6 +201,8 @@ bool Mutex::PKtryLock(PauseKernelLock& dLock)
 
 bool Mutex::PKunlock(PauseKernelLock& dLock)
 {
+    (void)dLock;
+
     Thread *p=Thread::PKgetCurrentThread();
     if(owner!=p) return false;
 
@@ -276,6 +280,8 @@ bool Mutex::PKunlock(PauseKernelLock& dLock)
 
 unsigned int Mutex::PKunlockAllDepthLevels(PauseKernelLock& dLock)
 {
+    (void)dLock;
+
     Thread *p=Thread::PKgetCurrentThread();
     if(owner!=p) return 0;
 
@@ -341,7 +347,7 @@ unsigned int Mutex::PKunlockAllDepthLevels(PauseKernelLock& dLock)
         owner=nullptr; //No threads waiting
         std::vector<Thread *>().swap(waiting); //Save some RAM
     }
-    
+
     if(recursiveDepth<0) return 0;
     unsigned int result=recursiveDepth;
     recursiveDepth=0;

@@ -83,7 +83,10 @@ public:
     #ifdef WITH_FILESYSTEM
     ;
     #else //WITH_FILESYSTEM
-    {}
+    {
+        (void)parent;
+        (void)flags;
+    }
     #endif //WITH_FILESYSTEM
 
     /**

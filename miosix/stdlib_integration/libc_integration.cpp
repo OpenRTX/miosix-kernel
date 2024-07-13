@@ -119,6 +119,11 @@ extern "C" {
  */
 int __register_exitproc(int type, void (*fn)(void*), void *arg, void *d)
 {
+    (void)type;
+    (void)fn;
+    (void)arg;
+    (void)d;
+
     return 0;
 }
 
@@ -127,7 +132,11 @@ int __register_exitproc(int type, void (*fn)(void*), void *arg, void *d)
  * \param code the exit code, for example with exit(1), code==1
  * \param d __dso_handle, see __register_exitproc
  */
-void __call_exitprocs(int code, void *d) {}
+void __call_exitprocs(int code, void *d)
+{
+    (void)code;
+    (void)d;
+}
 
 /**
  * \internal
@@ -149,6 +158,8 @@ void *__dso_handle=(void*) &__dso_handle;
  */
 void _exit(int n)
 {
+    (void)n;
+
     miosix::reboot();
     //Never reach here
     for(;;) ; //Required to avoid a warning about noreturn functions
@@ -160,6 +171,8 @@ void _exit(int n)
  */
 void *_sbrk_r(struct _reent *ptr, ptrdiff_t incr)
 {
+    (void)ptr;
+
     //This is the absolute start of the heap
     extern char _end asm("_end"); //defined in the linker script
     //This is the absolute end of the heap
@@ -190,7 +203,7 @@ void *_sbrk_r(struct _reent *ptr, ptrdiff_t incr)
 
     if(reinterpret_cast<unsigned int>(curHeapEnd) > miosix::maxHeapEnd)
         miosix::maxHeapEnd=reinterpret_cast<unsigned int>(curHeapEnd);
-    
+
     return reinterpret_cast<void*>(prevHeapEnd);
 }
 
@@ -244,6 +257,10 @@ struct _reent *__getreent()
  */
 int _open_r(struct _reent *ptr, const char *name, int flags, int mode)
 {
+    (void)name;
+    (void)flags;
+    (void)mode;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -285,6 +302,8 @@ int open(const char *name, int flags, ...)
  */
 int _close_r(struct _reent *ptr, int fd)
 {
+    (void)fd;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -317,7 +336,7 @@ int close(int fd)
  * _write_r, write to a file
  */
 ssize_t _write_r(struct _reent *ptr, int fd, const void *buf, size_t size)
-{    
+{
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -333,7 +352,7 @@ ssize_t _write_r(struct _reent *ptr, int fd, const void *buf, size_t size)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     if(fd==STDOUT_FILENO || fd==STDERR_FILENO)
     {
@@ -374,7 +393,7 @@ ssize_t _read_r(struct _reent *ptr, int fd, void *buf, size_t size)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     if(fd==STDIN_FILENO)
     {
@@ -400,6 +419,10 @@ ssize_t read(int fd, void *buf, size_t size)
  */
 off_t _lseek_r(struct _reent *ptr, int fd, off_t pos, int whence)
 {
+    (void)fd;
+    (void)pos;
+    (void)whence;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -415,7 +438,7 @@ off_t _lseek_r(struct _reent *ptr, int fd, off_t pos, int whence)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=EBADF;
     return -1;
@@ -448,7 +471,7 @@ int _fstat_r(struct _reent *ptr, int fd, struct stat *pstat)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     switch(fd)
     {
@@ -477,6 +500,9 @@ int fstat(int fd, struct stat *pstat)
  */
 int _stat_r(struct _reent *ptr, const char *file, struct stat *pstat)
 {
+    (void)file;
+    (void)pstat;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -492,7 +518,7 @@ int _stat_r(struct _reent *ptr, const char *file, struct stat *pstat)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return -1;
@@ -527,6 +553,9 @@ int _lstat_r(struct _reent *ptr, const char *file, struct stat *pstat)
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void)file;
+    (void)pstat;
+
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -559,7 +588,7 @@ int _isatty_r(struct _reent *ptr, int fd)
         return 0;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     switch(fd)
     {
@@ -585,6 +614,10 @@ int isatty(int fd)
  */
 int _fcntl_r(struct _reent *ptr, int fd, int cmd, int opt)
 {
+    (void)fd;
+    (void)cmd;
+    (void)opt;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -600,7 +633,7 @@ int _fcntl_r(struct _reent *ptr, int fd, int cmd, int opt)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return -1;
@@ -647,7 +680,7 @@ int _ioctl_r(struct _reent *ptr, int fd, int cmd, void *arg)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     if(fd==STDIN_FILENO || fd==STDOUT_FILENO || fd==STDERR_FILENO)
     {
@@ -673,6 +706,9 @@ int ioctl(int fd, int cmd, void *arg)
  */
 char *_getcwd_r(struct _reent *ptr, char *buf, size_t size)
 {
+    (void)buf;
+    (void)size;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -688,7 +724,7 @@ char *_getcwd_r(struct _reent *ptr, char *buf, size_t size)
         return nullptr;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return nullptr;
@@ -706,6 +742,8 @@ char *getcwd(char *buf, size_t size)
  */
 int _chdir_r(struct _reent *ptr, const char *path)
 {
+    (void)path;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -721,7 +759,7 @@ int _chdir_r(struct _reent *ptr, const char *path)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return -1;
@@ -739,6 +777,9 @@ int chdir(const char *path)
  */
 int _mkdir_r(struct _reent *ptr, const char *path, int mode)
 {
+    (void)path;
+    (void)mode;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -754,7 +795,7 @@ int _mkdir_r(struct _reent *ptr, const char *path, int mode)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return -1;
@@ -772,6 +813,8 @@ int mkdir(const char *path, mode_t mode)
  */
 int _rmdir_r(struct _reent *ptr, const char *path)
 {
+    (void)path;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -787,7 +830,7 @@ int _rmdir_r(struct _reent *ptr, const char *path)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return -1;
@@ -805,7 +848,11 @@ int rmdir(const char *path)
  */
 int _link_r(struct _reent *ptr, const char *f_old, const char *f_new)
 {
+    (void)f_old;
+
     ptr->_errno=EMFILE; //Currently no fs supports hardlinks
+    (void)f_new;
+
     return -1;
 }
 
@@ -820,6 +867,8 @@ int link(const char *f_old, const char *f_new)
  */
 int _unlink_r(struct _reent *ptr, const char *file)
 {
+    (void)file;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -835,7 +884,7 @@ int _unlink_r(struct _reent *ptr, const char *file)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return -1;
@@ -853,6 +902,9 @@ int unlink(const char *file)
  */
 int _symlink_r(struct _reent *ptr, const char *target, const char *linkpath)
 {
+    (void)target;
+    (void)linkpath;
+
     ptr->_errno=ENOENT; //Unimplemented at the moment
     return -1;
 }
@@ -885,6 +937,10 @@ ssize_t _readlink_r(struct _reent *ptr, const char *path, char *buf, size_t size
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void)path;
+    (void)buf;
+    (void)size;
+
     ptr->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -918,6 +974,9 @@ int truncate(const char *path, off_t size)
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void)path;
+    (void)size;
+
     miosix::getReent()->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -946,6 +1005,9 @@ int ftruncate(int fd, off_t size)
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void)fd;
+    (void)size;
+
     miosix::getReent()->_errno=EBADF;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -957,6 +1019,9 @@ int ftruncate(int fd, off_t size)
  */
 int _rename_r(struct _reent *ptr, const char *f_old, const char *f_new)
 {
+    (void)f_old;
+    (void)f_new;
+
     #ifdef WITH_FILESYSTEM
 
     #ifndef __NO_EXCEPTIONS
@@ -972,7 +1037,7 @@ int _rename_r(struct _reent *ptr, const char *f_old, const char *f_new)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
     ptr->_errno=ENOENT;
     return -1;
@@ -1005,8 +1070,12 @@ int getdents(int fd, struct dirent *buf, unsigned int size)
         return -1;
     }
     #endif //__NO_EXCEPTIONS
-    
+
     #else //WITH_FILESYSTEM
+    (void)fd;
+    (void)buf;
+    (void)size;
+
     miosix::getReent()->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -1031,6 +1100,8 @@ int dup(int fd)
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void)fd;
+
     miosix::getReent()->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -1055,6 +1126,9 @@ int dup2(int oldfd, int newfd)
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void)oldfd;
+    (void)newfd;
+
     miosix::getReent()->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -1079,6 +1153,8 @@ int pipe(int fds[2])
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_FILESYSTEM
+    (void)fds;
+
     miosix::getReent()->_errno=ENOENT;
     return -1;
     #endif //WITH_FILESYSTEM
@@ -1104,11 +1180,13 @@ int pipe(int fds[2])
  * - time         -> gettimeofday     -> clock_gettime
  *
  * UNSUPPORTED
- * - timer_create -> ? 
+ * - timer_create -> ?
  */
 
 int clock_gettime(clockid_t clock_id, struct timespec *tp)
 {
+    (void)clock_id;
+
     if(tp==nullptr) return -1;
     //TODO: support CLOCK_REALTIME
     miosix::ll2timespec(miosix::getTime(),tp);
@@ -1117,12 +1195,17 @@ int clock_gettime(clockid_t clock_id, struct timespec *tp)
 
 int clock_settime(clockid_t clock_id, const struct timespec *tp)
 {
+    (void)clock_id;
+    (void)tp;
+
     //TODO: support CLOCK_REALTIME
     return -1;
 }
 
 int clock_getres(clockid_t clock_id, struct timespec *res)
 {
+    (void)clock_id;
+
     if(res==nullptr) return -1;
     //TODO: support CLOCK_REALTIME
 
@@ -1138,6 +1221,9 @@ int clock_getres(clockid_t clock_id, struct timespec *res)
 int clock_nanosleep(clockid_t clock_id, int flags,
                     const struct timespec *req, struct timespec *rem)
 {
+    (void)clock_id;
+    (void)rem;
+
     if(req==nullptr) return -1;
     //TODO: support CLOCK_REALTIME
     long long timeNs=miosix::timespec2ll(req);
@@ -1152,6 +1238,8 @@ int clock_nanosleep(clockid_t clock_id, int flags,
  */
 clock_t _times_r(struct _reent *ptr, struct tms *tim)
 {
+    (void)ptr;
+
     struct timespec tp;
     //No CLOCK_PROCESS_CPUTIME_ID support, use CLOCK_MONOTONIC
     if(clock_gettime(CLOCK_MONOTONIC,&tp)) return static_cast<clock_t>(-1);
@@ -1185,6 +1273,8 @@ clock_t times(struct tms *tim)
 
 int _gettimeofday_r(struct _reent *ptr, struct timeval *tv, void *tz)
 {
+    (void)ptr;
+
     if(tv==nullptr || tz!=nullptr) return -1;
     struct timespec tp;
     if(clock_gettime(CLOCK_REALTIME,&tp)) return -1;
@@ -1214,6 +1304,9 @@ int nanosleep(const struct timespec *req, struct timespec *rem)
  */
 int _kill_r(struct _reent* ptr, int pid, int sig)
 {
+    (void)ptr;
+    (void)sig;
+
     if(pid==0) _exit(1); //pid 0 is the kernel
     else return -1;
 }
@@ -1229,6 +1322,8 @@ int kill(int pid, int sig)
  */
 int _getpid_r(struct _reent* ptr)
 {
+    (void)ptr;
+
     return 0;
 }
 
@@ -1262,6 +1357,9 @@ int _wait_r(struct _reent *ptr, int *status)
     ptr->_errno=-result;
     return -1;
     #else //WITH_PROCESSES
+    (void)ptr;
+    (void)status;
+
     return -1;
     #endif //WITH_PROCESSES
 }
@@ -1283,6 +1381,10 @@ pid_t waitpid(pid_t pid, int *status, int options)
     errno=-result;
     return -1;
     #else //WITH_PROCESSES
+    (void)pid;
+    (void)status;
+    (void)options;
+
     return -1;
     #endif //WITH_PROCESSES
 }
@@ -1296,9 +1398,17 @@ int _execve_r(struct _reent *ptr, const char *path, char *const argv[],
         char *const env[])
 {
     #ifdef WITH_PROCESSES
+    (void)path;
+    (void)argv;
+    (void)env;
     ptr->_errno=-EFAULT;
     return -1;
     #else //WITH_PROCESSES
+    (void)ptr;
+    (void)path;
+    (void)argv;
+    (void)env;
+
     return -1;
     #endif //WITH_PROCESSES
 }
@@ -1336,6 +1446,13 @@ int posix_spawn(pid_t *pid, const char *path,
     #endif //__NO_EXCEPTIONS
 
     #else //WITH_PROCESSES
+    (void)pid;
+    (void)path;
+    (void)a;
+    (void)s;
+    (void)argv;
+    (void)envp;
+
     return 1;
     #endif //WITH_PROCESSES
 }

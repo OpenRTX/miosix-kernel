@@ -71,8 +71,13 @@ static void callConstructors(unsigned long *start, unsigned long *end)
     }
 }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+
 void *mainLoader(void *argv)
 {
+    (void)argv;
+
     //If reaches here kernel is started, print Ok
     bootlog("Ok\n%s\n",getMiosixVersion());
 
@@ -89,12 +94,12 @@ void *mainLoader(void *argv)
     callConstructors(&__preinit_array_start, &__preinit_array_end);
     callConstructors(&__init_array_start, &__init_array_end);
     callConstructors(&_ctor_start, &_ctor_end);
-    
+
     bootlog("OS Timer freq = %d Hz\n", internal::osTimerGetFrequency());
     bootlog("Available heap %d out of %d Bytes\n",
             MemoryProfiling::getCurrentFreeHeap(),
             MemoryProfiling::getHeapSize());
-    
+
     //Run application code
     #ifdef __NO_EXCEPTIONS
     main(0,NULL);
@@ -108,11 +113,13 @@ void *mainLoader(void *argv)
         errorLog("***An exception propagated through a thread\n");
     }
     #endif //__NO_EXCEPTIONS
-    
+
     //If main returns, shutdown
     shutdown();
     return 0;
 }
+
+#pragma GCC diagnostic pop
 
 } //namespace miosix
 
