@@ -63,6 +63,7 @@
 #OPT_BOARD := stm32f765ii_marco_ram_board
 #OPT_BOARD := rp2040_raspberry_pi_pico
 #OPT_BOARD := stm32h755zi_nucleo
+#OPT_BOARD := stm32f405_generic
 
 ##
 ## Optimization flags, choose one.
@@ -835,6 +836,18 @@ ifeq ($(OPT_BOARD),stm32h755zi_nucleo)
 
 endif
 
+##---------------------------------------------------------------------------
+## stm32f405_generic
+##
+
+ifeq ($(OPT_BOARD),stm32f405_generic)
+
+    ## Select clock frequency
+    CLOCK_FREQ := -DHSE_VALUE=8000000 -DSYSCLK_FREQ_168MHz=168000000
+    #CLOCK_FREQ := -DHSE_VALUE=8000000 -DSYSCLK_FREQ_100MHz=100000000
+    #CLOCK_FREQ := -DHSE_VALUE=8000000 -DSYSCLK_FREQ_84MHz=84000000
+
+endif
 
 ############################################################################
 ## From the options selected above, now fill all the variables needed to  ##
@@ -955,6 +968,8 @@ else ifeq ($(OPT_BOARD),rp2040_raspberry_pi_pico)
     ARCH := cortexM0plus_rp2040
 else ifeq ($(OPT_BOARD),stm32h755zi_nucleo)
     ARCH := cortexM7_stm32h7
+else ifeq ($(OPT_BOARD),stm32f405_generic)
+    ARCH := cortexM4_stm32f4
 else
     $(info Error: no board specified in miosix/config/Makefile.inc)
     $(error Error)
@@ -1926,6 +1941,35 @@ else ifeq ($(ARCH),cortexM4_stm32f4)
 
         ## Select clock frequency (HSE_VALUE is the xtal on board, fixed)
         CLOCK_FREQ := -DHSE_VALUE=8000000 -DSYSCLK_FREQ_168MHz=168000000
+
+        ## Select programmer command line
+        ## This is the program that is invoked when the user types
+        ## 'make program'
+        ## The command must provide a way to program the board, or print an
+        ## error message saying that 'make program' is not supported for that
+        ## board.
+        PROG ?= st-flash --connect-under-reset --reset write \
+                $(if $(ROMFS_DIR), image.bin, main.bin) 0x08000000
+
+    ##-------------------------------------------------------------------------
+    ## BOARD: stm32f405_generic
+    ##
+    else ifeq ($(OPT_BOARD),stm32f405_generic)
+        ## Base directory with header files for this board
+        BOARD_INC := arch/cortexM4_stm32f4/stm32f405_generic
+
+        ## Select linker script
+        LINKER_SCRIPT := $(BOARD_INC)/stm32_1m+192k_rom.ld
+
+        ## Select architecture specific files
+        ## These are the files in arch/<arch name>/<board name>
+        ARCH_SRC :=                                  \
+        $(BOARD_INC)/core/stage_1_boot.cpp           \
+        $(BOARD_INC)/interfaces-impl/bsp.cpp
+
+        ## Add a #define to allow querying board name
+        CFLAGS_BASE   += -D_BOARD_STM32F405_GENERIC
+        CXXFLAGS_BASE += -D_BOARD_STM32F405_GENERIC
 
         ## Select programmer command line
         ## This is the program that is invoked when the user types
