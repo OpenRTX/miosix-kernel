@@ -196,6 +196,7 @@ static void SetSysClock(void);
 #if defined (DATA_IN_ExtSRAM) || defined (DATA_IN_ExtSDRAM)
   static void SystemInit_ExtMemCtl(void); 
 #endif /* DATA_IN_ExtSRAM || DATA_IN_ExtSDRAM */
+void SystemInitHook(void);
 
 /**
   * @}
@@ -254,6 +255,8 @@ void SystemInit(void)
 #else
   SCB->VTOR = FLASH_BASE | VECT_TAB_OFFSET; /* Vector Table Relocation in Internal FLASH */
 #endif
+
+  SystemInitHook();
 }
 
 /**
@@ -672,6 +675,13 @@ void SystemInit_ExtMemCtl(void)
 #endif /* STM32F405xx || STM32F415xx || STM32F407xx || STM32F417xx || STM32F427xx || STM32F437xx || STM32F429xx || STM32F439xx */ 
 }
 #endif /* DATA_IN_ExtSRAM || DATA_IN_ExtSDRAM */
+
+
+__attribute__ ((weak)) void SystemInitHook (void)
+{
+  // Default implementation of the SystemInit hoolk funcion
+}
+
 /**
   * @}
   */
