@@ -243,6 +243,7 @@ void SystemInit (void)
   SCB->VTOR = FLASH_BANK1_BASE | VECT_TAB_OFFSET;       /* Vector Table Relocation in Internal FLASH */
 #endif
 
+  SystemInitHook();
 }
 
 /**
@@ -575,6 +576,10 @@ void SystemInit_ExtMemCtl(void)
 }
 #endif /* DATA_IN_ExtSRAM || DATA_IN_ExtSDRAM */
 
+__attribute__ ((weak)) void SystemInitHook (void)
+{
+  // Default implementation of the SystemInit hoolk funcion
+}
 
 /**
   * @}
