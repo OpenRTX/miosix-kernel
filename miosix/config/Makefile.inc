@@ -65,6 +65,7 @@
 #OPT_BOARD := stm32h755zi_nucleo
 #OPT_BOARD := stm32f405_generic
 #OPT_BOARD := mk22fn512vxx12_generic
+#OPT_BOARD := stm32h743_generic
 
 ##
 ## Optimization flags, choose one.
@@ -856,6 +857,19 @@ endif
 
 # No options
 
+##---------------------------------------------------------------------------
+## stm32h743_generic
+##
+
+ifeq ($(OPT_BOARD),stm32h743_generic)
+
+    ## Select clock frequency
+    ## Silicon revision Y and W cannot reach the maximum frequency of 480MHz:
+    ## because of this the clock speed is  kept limited to 400MHz
+    CLOCK_FREQ := -DHSE_VALUE=25000000 -DSYSCLK_FREQ_400MHz=400000000
+
+endif
+
 ############################################################################
 ## From the options selected above, now fill all the variables needed to  ##
 ## build Miosix. You should modify something here only if you are adding  ##
@@ -979,6 +993,8 @@ else ifeq ($(OPT_BOARD),stm32f405_generic)
     ARCH := cortexM4_stm32f4
 else ifeq ($(OPT_BOARD), mk22fn512vxx12_generic)
     ARCH := cortexM4_mk22
+else ifeq ($(OPT_BOARD), stm32h743_generic)
+    ARCH := cortexM7_stm32h7
 else
     $(info Error: no board specified in miosix/config/Makefile.inc)
     $(error Error)
@@ -2741,6 +2757,37 @@ else ifeq ($(ARCH),cortexM7_stm32h7)
         ## While the chip can run up to 480MHz, the board uses the SMPS feature
         ## that limits clock speed to 400MHz
         CLOCK_FREQ := -DHSE_VALUE=8000000 -DSYSCLK_FREQ_400MHz=400000000
+
+        ## Select programmer command line
+        ## This is the program that is invoked when the user types
+        ## 'make program'
+        ## The command must provide a way to program the board, or print an
+        ## error message saying that 'make program' is not supported for that
+        ## board.
+        PROG ?= st-flash --connect-under-reset --reset write \
+                $(if $(ROMFS_DIR), image.bin, main.bin) 0x08000000
+
+    ##-------------------------------------------------------------------------
+    ## BOARD: stm32h743_generic
+    ##
+    else ifeq ($(OPT_BOARD),stm32h743_generic)
+        ## Base directory with header files for this board
+        BOARD_INC := arch/cortexM7_stm32h7/stm32h743_generic
+
+        ## Select linker script
+        LINKER_SCRIPT_PATH := arch/cortexM7_stm32h7/stm32h743_generic/
+        LINKER_SCRIPT := $(LINKER_SCRIPT_PATH)stm32_2m+512k_rom.ld
+
+        ## Select architecture specific files
+        ## These are the files in arch/<arch name>/<board name>
+        ARCH_SRC :=                                  \
+        $(BOARD_INC)/core/stage_1_boot.cpp           \
+        arch/common/drivers/stm32_hardware_rng.cpp   \
+        $(BOARD_INC)/interfaces-impl/bsp.cpp
+
+        ## Add a #define to allow querying board name
+        CFLAGS_BASE   += -D_BOARD_STM32H753_GENERIC
+        CXXFLAGS_BASE += -D_BOARD_STM32H753_GENERIC
 
         ## Select programmer command line
         ## This is the program that is invoked when the user types
