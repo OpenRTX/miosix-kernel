@@ -65,6 +65,17 @@ static constexpr unsigned int R=2;   // 800MHz/P=400MHz
 #else
 #error "SYSCLK value not supported!"
 #endif
+#elif (HSE_VALUE == 5000000)
+static constexpr unsigned int rge=0b10; //4..8MHz
+static constexpr unsigned int M=1;   // 5MHz/M=5MHz
+#if defined(SYSCLK_FREQ_400MHz)
+static constexpr unsigned int N=160; // 5MHz*N=800MHz
+static constexpr unsigned int P=2;   // 800MHz/P=400MHz
+static constexpr unsigned int Q=8;   // 800MHz/P=100MHz (for SDMMC)
+static constexpr unsigned int R=2;   // 800MHz/P=400MHz
+#else
+#error "SYSCLK value not supported!"
+#endif
 #else
 #error "HSE value not supported!"
 #endif

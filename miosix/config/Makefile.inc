@@ -867,6 +867,7 @@ ifeq ($(OPT_BOARD),stm32h743_generic)
     ## Silicon revision Y and W cannot reach the maximum frequency of 480MHz:
     ## because of this the clock speed is  kept limited to 400MHz
     CLOCK_FREQ := -DHSE_VALUE=25000000 -DSYSCLK_FREQ_400MHz=400000000
+    #CLOCK_FREQ := -DHSE_VALUE=5000000 -DSYSCLK_FREQ_400MHz=400000000
 
 endif
 
