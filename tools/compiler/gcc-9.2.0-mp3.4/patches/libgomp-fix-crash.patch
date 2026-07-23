@@ -1,0 +1,103 @@
+diff -ruN gcc-9.2.0-old/libgomp/configure.tgt gcc-9.2.0/libgomp/configure.tgt
+--- gcc-9.2.0-old/libgomp/configure.tgt	2025-06-29 12:33:39.052395119 +0200
++++ gcc-9.2.0/libgomp/configure.tgt	2025-06-29 13:15:29.584489834 +0200
+@@ -159,6 +159,8 @@
+ 
+   *-miosix-*)
+     config_path="posix"
++    # libgomp uses pthread_exit which on Miosix throws a terminate exception
++    XCFLAGS="${XCFLAGS} -fexceptions"
+     ;;
+ 
+   *-*-rtems*)
+diff -ruN gcc-9.2.0-old/libgomp/libgomp.h gcc-9.2.0/libgomp/libgomp.h
+--- gcc-9.2.0-old/libgomp/libgomp.h	2019-01-01 13:31:55.000000000 +0100
++++ gcc-9.2.0/libgomp/libgomp.h	2025-06-26 14:23:42.980043159 +0200
+@@ -700,9 +700,22 @@
+ }
+ #else
+ extern pthread_key_t gomp_tls_key;
++struct gomp_thread *gomp_initialize_tls_key (void);
+ static inline struct gomp_thread *gomp_thread (void)
+ {
+-  return pthread_getspecific (gomp_tls_key);
++  /* NOTE: if openmp is only used by main(), then initialize_team() takes care
++   * of initializing gomp_tls_key for main() as team leader. However, if the
++   * application spawns a thread using pthread, C11 or C++11 threads and *that*
++   * thread tries to call some OpenMP-parallelized code, no one initialized
++   * gomp_tls_key for that thread, and pthread_getspecific() returns NULL.
++   * Calling gomp_initialize_tls_key() solves the issue.
++   */
++  void *gomp_tls_ptr = pthread_getspecific (gomp_tls_key);
++  if (!gomp_tls_ptr)
++  {
++    gomp_tls_ptr = gomp_initialize_tls_key ();
++  }
++  return gomp_tls_ptr;
+ }
+ #endif
+ 
+diff -ruN gcc-9.2.0-old/libgomp/team.c gcc-9.2.0/libgomp/team.c
+--- gcc-9.2.0-old/libgomp/team.c	2019-03-27 19:30:44.000000000 +0100
++++ gcc-9.2.0/libgomp/team.c	2025-06-29 11:22:10.736233333 +0200
+@@ -43,6 +43,20 @@
+ __thread struct gomp_thread gomp_tls_data;
+ #else
+ pthread_key_t gomp_tls_key;
++
++struct gomp_thread *gomp_initialize_tls_key (void)
++{
++	struct gomp_thread *gomp_tls_ptr = malloc (sizeof (struct gomp_thread));
++	if (!gomp_tls_ptr) gomp_fatal ("Out of memory");
++	memset (gomp_tls_ptr, 0, sizeof (struct gomp_thread));
++	pthread_setspecific (gomp_tls_key, gomp_tls_ptr);
++	return gomp_tls_ptr;
++}
++
++void gomp_delete_tls_key (void* ptr)
++{
++	free (ptr);
++}
+ #endif
+ 
+ 
+@@ -76,9 +90,7 @@
+ #if defined HAVE_TLS || defined USE_EMUTLS
+   thr = &gomp_tls_data;
+ #else
+-  struct gomp_thread local_thr;
+-  thr = &local_thr;
+-  pthread_setspecific (gomp_tls_key, thr);
++  thr = gomp_initialize_tls_key ();
+ #endif
+   gomp_sem_init (&thr->release, 0);
+ 
+@@ -247,9 +259,13 @@
+ /* Free a thread pool and release its threads. */
+ 
+ void
+-gomp_free_thread (void *arg __attribute__((unused)))
++gomp_free_thread (void *arg)
+ {
+-  struct gomp_thread *thr = gomp_thread ();
++  // NOTE: we cannot call gomp_thread () here as it calls pthread_getspecific ()
++  // and the POSIX semantics require the pthread_key value to be set to NULL
++  // before calling the destructor. We must get the struct gomp_thread pointer
++  // from the arg parameter!
++  struct gomp_thread *thr = (struct gomp_thread *) arg;
+   struct gomp_thread_pool *pool = thr->thread_pool;
+   if (pool)
+     {
+@@ -999,10 +1015,8 @@
+ initialize_team (void)
+ {
+ #if !defined HAVE_TLS && !defined USE_EMUTLS
+-  static struct gomp_thread initial_thread_tls_data;
+-
+-  pthread_key_create (&gomp_tls_key, NULL);
+-  pthread_setspecific (gomp_tls_key, &initial_thread_tls_data);
++  pthread_key_create (&gomp_tls_key, gomp_delete_tls_key);
++  gomp_initialize_tls_key ();
+ #endif
+ 
+   if (pthread_key_create (&gomp_thread_destructor, gomp_free_thread) != 0)

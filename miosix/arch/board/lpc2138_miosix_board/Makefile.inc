@@ -1,0 +1,19 @@
+##
+## Makefile for board lpc2138_miosix_board
+## Included by Makefile.inc based on the board currently selected
+##
+
+## Base directory with header files for this board
+CHIP_INC := arch/chip/lpc2000
+
+## Select linker script
+LINKER_SCRIPT := unikernel.ld
+
+## Select architecture specific files
+## These are the files in arch/<arch name>/<board name>
+BOARD_SRC :=                                  \
+$(BOARD_INC)/interfaces-impl/bsp.cpp
+
+## Add a #define to allow querying board name
+BOARD_CFLAGS   := -D_BOARD_MIOSIX_BOARD
+BOARD_CXXFLAGS := -D_BOARD_MIOSIX_BOARD

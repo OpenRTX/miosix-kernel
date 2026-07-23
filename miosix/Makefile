@@ -4,18 +4,19 @@
 ##
 
 ## KPATH and CONFPATH are forwarded by the parent Makefile
-MAKEFILE_VERSION := 1.15
+MAKEFILE_VERSION := 3.01
 include $(KPATH)/Makefile.kcommon
 
 ## List of all Miosix OS source files that have no special requirements
 ## and that must be built for each architecture (both .c and .cpp)
 ## These files will end up in libmiosix.a
 SRC :=                                                                     \
-kernel/kernel.cpp                                                          \
+kernel/thread.cpp                                                          \
+kernel/lock.cpp                                                            \
 kernel/sync.cpp                                                            \
 kernel/error.cpp                                                           \
 kernel/pthread.cpp                                                         \
-kernel/stage_2_boot.cpp                                                    \
+kernel/boot.cpp                                                            \
 kernel/elf_program.cpp                                                     \
 kernel/process.cpp                                                         \
 kernel/process_pool.cpp                                                    \
@@ -42,8 +43,8 @@ filesystem/littlefs/lfs_miosix.cpp                                         \
 filesystem/littlefs/lfs.c                                                  \
 filesystem/littlefs/lfs_util.c                                             \
 filesystem/romfs/romfs.cpp                                                 \
-stdlib_integration/libc_integration.cpp                                    \
-stdlib_integration/libstdcpp_integration.cpp                               \
+kercalls/libc_integration.cpp                                              \
+kercalls/libstdcpp_integration.cpp                                         \
 e20/e20.cpp                                                                \
 e20/unmember.cpp                                                           \
 util/util.cpp                                                              \
@@ -55,14 +56,14 @@ util/lcd44780.cpp
 ## Add the architecture dependand sources to the list of files to build.
 ## ARCH_SRC will contain different source files depending on which
 ## architecture/board is selected in config/Makefile.inc
-SRC += $(ARCH_SRC)
+SRC += $(BOARD_SRC) $(CHIP_SRC)
 
 CFLAGS   += -DCOMPILING_MIOSIX
 CXXFLAGS += -DCOMPILING_MIOSIX
 
 all: $(OBJ)
 	$(ECHO) "[PERL] Checking global objects"
-	$(Q)perl _tools/kernel_global_objects.pl $(OBJ)
+	$(Q)perl $(TOOLS_DIR)/kernel_global_objects.pl $(OBJ)
 	$(ECHO) "[AR  ] libmiosix.a"
 	$(Q)$(AR) rcs libmiosix.a $(OBJ)
 

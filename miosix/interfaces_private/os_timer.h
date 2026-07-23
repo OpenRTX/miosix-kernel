@@ -1,0 +1,626 @@
+/***************************************************************************
+ *   Copyright (C) 2015-2021 by Terraneo Federico, Sasan Golchin           *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   As a special exception, if other files instantiate templates or use   *
+ *   macros or inline functions from this file, or you compile this file   *
+ *   and link it with other works to produce a work based on this file,    *
+ *   this file does not by itself cause the resulting work to be covered   *
+ *   by the GNU General Public License. However the source code for this   *
+ *   file must still be made available in accordance with the GNU General  *
+ *   Public License. This exception does not invalidate any other reasons  *
+ *   why a work based on this file might be covered by the GNU General     *
+ *   Public License.                                                       *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
+ ***************************************************************************/
+
+#pragma once
+
+#ifndef COMPILING_MIOSIX
+#error "This is header is private, it can't be used outside Miosix itself."
+#error "If your code depends on a private header, it IS broken."
+#endif //COMPILING_MIOSIX
+
+#include "miosix_settings.h"
+#include "kernel/timeconversion.h"
+
+/**
+ * \addtogroup Interfaces
+ * \{
+ */
+
+/**
+ * \file os_timer.h
+ * This file contains the interface through which the OS accesses the underlying
+ * hardware timer, that is used to:
+ * - measure time durations
+ * - set interrupts used both preemption and to handle sleeping threads wakeup
+ *
+ * Starting from Miosix 3, the OS supports two different timer models:
+ * separate and unified, selected with the option OS_TIMER_MODEL_UNIFIED
+ * in miosix_settings.h.
+ *
+ * Separate timer model, also called 1+N timer model.
+ * This is the timer model you want to use if you care about speed and your
+ * platform has at least 1+N timers, where N is the number of cores in your CPU.
+ * The motivation and design of this model can be found in the paper "Efficient
+ * Design of High-Resolution Timekeeping in Real-Time Operating Systems".
+ * https://doi.org/10.4230/OASIcs.NG-RES.2026.4
+ * Summarizing, the implementation is expected to use a separate high-resolution
+ * timer for timekeeping, plus one additional timer per-core for preemption.
+ * It is expected that on ARM architectures, the per-core preemption timers be
+ * implemented using the ARM SysTick which is a per-core timer meant for that
+ * purpose. An additional <b>upcounting</b> timer <b>with match register</b> is
+ * needed for timekeeping. Regardless of the cosen timer model, the ARM SysTick
+ * is not enough due to it not meeting the high-resolution timer requirements.
+ * In the separate model, all cores, including the WAKEUP_HANDLING_CORE use
+ * the IRQosTimerSetPreemption() function to schedule preemption interrupts,
+ * and when the set time is reached, the scheduler must be called by the timer
+ * driver <b>on the core that</b> called IRQosTimerSetPreemption().
+ * IRQosTimerSetInterrupt() is used only for thread wakeup and when that set
+ * time is reached, the separate timekeeping timer driver will need to call the
+ * IRQwakeThreads() kernel function <b>always on the WAKEUP_HANDLING_CORE</b>,
+ * regardless of the core that called IRQosTimerSetInterrupt().
+ * NOTE: in the separate model the WAKEUP_HANDLING_CORE calls both
+ * IRQosTimerSetPreemption() to set preemptions, and IRQosTimerSetInterrupt()
+ * for thread wakeups. Thus, even in single-core microcontrollers, both APIs
+ * must be provided, requiring two hardware timers.
+ *
+ * Unified timer model.
+ * This is the slower timer model where a single timer does all the timekeeping.
+ * In this case the implementation is expected to use a single hardware timer
+ * for serving all the timekeeping functions for the entire OS, even if multiple
+ * CPU cores are present.
+ * In single-core microcontrollers, a single timer with a single match register
+ * is all that's needed to run the kernel, while on a multi-core microcontroller
+ * the single timer must have a number of match registers equal to the number
+ * of available cores. Due to the need for an upcounting timer for fine-grain
+ * timekeeping as well as the need for multiple per-core match registers, the
+ * ARM SysTick <b>cannot</b> be used as OS timer in the unified model.
+ * Also in the unified model, one special core, identified by the constant
+ * WAKEUP_HANDLING_CORE, is in charge of handling timekeeping and task wakeup.
+ * In the unified model, the OS scheduler on that core will set both thread
+ * wakeup and preemption interrupts by calling IRQosTimerSetInterrupt() and when
+ * the the set time is reached, the timer driver must call the IRQwakeThreads()
+ * kernel function <b>always on the WAKEUP_HANDLING_CORE</b>, regardless of the
+ * core IRQosTimerSetInterrupt() is called from.
+ * Cores othar than WAKEUP_HANDLING_CORE will instead set preemption interrupts
+ * by calling IRQosTimerSetPreemption() and when the set time is reached, the
+ * scheduler must be called by the timer driver <b>on the core that</b> called
+ * IRQosTimerSetPreemption().
+ * NOTE: in the unified model, the WAKEUP_HANDLING_CORE never calls
+ * IRQosTimerSetPreemption(), it always calls IRQosTimerSetInterrupt() for both
+ * thread wakeup and preemptions. Indeed, in single-core architecture where the
+ * only core is WAKEUP_HANDLING_CORE, IRQosTimerSetPreemption() is not needed,
+ * thus a single timer can be used.
+ *
+ * NOTE: in multi-cores, regardless of the selected timer model, cores other
+ * than WAKEUP_HANDLING_CORE can call IRQosTimerSetInterrupt() if a thread on
+ * that core does a sleep. Regardless of the chosen timer model and the core
+ * IRQosTimerSetInterrupt() is called from, the interrupt set by
+ * IRQosTimerSetInterrupt() must always run the IRQwakeThreads() function from
+ * the WAKEUP_HANDLING_CORE.
+ *
+ * Finally, a note on timer accuracy. To provide accurate timekeeping,
+ * IRQosTimerSetInterrupt() must perform the nanosecond to tick conversion
+ * accurately and not accumulate clock skew. This is usually done by never
+ * stopping the underlying timer. It is highly recommended to use the
+ * TimeConversion class in the timer drivers to convert the underlying hardware
+ * timer ticks to nanoseconds.
+ * The preemption timer can instead be coarser grain and do not need to care
+ * about not accumulating clock skew. This is also why it is permissible to use
+ * the ARM SysTick for this purpose. A CoarseTimeConversion class is provided.
+ * 
+ * NOTE: when porting Miosix, on architectures providing a 16/32 bit timer with
+ * - a timer counting up
+ * - a match register capable of generating interrupts
+ * - an overflow interrupt
+ * the timekeeping and task wakeup part (getTime(), IRQosTimerSetInterrupt()) of
+ * the timer API can simply be implemented by deriving the TimerAdapter
+ * providing the required functions to access the hardware timer, and the
+ * DEFAULT_OS_TIMER_INTERFACE_IMPLEMENTATION macro to implement the os_timer
+ * interface. On single-core microcontrollers using the unified model and thus
+ * not needing the IRQosTimerSetPreemption() API, this covers the entire API
+ * required to run Miosix, but you should consider using the separate timer
+ * model as it improves performance, especially of the scheduler. On ARM Cortex,
+ * arm_systick_os_timer.cpp provides the missing piece to do so.
+ */
+
+namespace miosix {
+
+// This is a function that is part of the internal implementation of the kernel
+// defined in thread.cpp. User code should not know about this nor try to use it
+extern void IRQwakeThreads(long long currentTime);
+
+// The os timer platform-specific implementation shall provide these two
+// functions, although they are not declared here, but in thread.h, as
+// these are the only two function that are meant to be called also from
+// application code. For comments about the intended behavior, see thread.h
+//long long getTime() noexcept;
+//long long IRQgetTime() noexcept;
+
+/**
+ * \internal
+ * Initialize and start the os timer.
+ * This function is used by the kernel, and should not be used by end users.
+ * On SMP platforms, this function is called early at boot on core 0.
+ */
+void IRQosTimerInit();
+
+#ifdef WITH_SMP
+/**
+ * \internal
+ * Initialize the OS timer for a given core during SMP setup.
+ * This function is used by the kernel, and should not be used by end users, and
+ * is called at boot by SMP setup code once for each core from each core, so
+ * that each core calls this function exactly once.
+ * On non-SMP platforms it is not called.
+ */
+void IRQosTimerInitSMP();
+#endif //WITH_SMP
+
+#if defined(WITH_SMP) || !defined(OS_TIMER_MODEL_UNIFIED)
+/**
+ * \internal
+ * Set the next preemption interrupt. When the set time is reached, the timer
+ * driver must call the scheduler on the core where the function was called.
+ *
+ * If the timer model is unified, this function is never called on the
+ * WAKEUP_HANDLING_CORE, thus on a single-core architecture, this function is
+ * never called at all, and on multi-core architectures the driver must manage
+ * up to CPU_NUM_CORES-1 concurrent calls, one for each core that is not
+ * WAKEUP_HANDLING_CORE.
+ *
+ * If the timer model is separate, then each core including WAKEUP_HANDLING_CORE
+ * calls this function to handle preemption, and the timer driver is expected
+ * to use a number of timers equals to CPU_NUM_CORES, each handling calls
+ * from the local core and calling the scheduler on the core the timer has been
+ * set.
+ *
+ * This function is used by the kernel, and should not be used by end users.
+ * Can be called with interrupts disabled or within an interrupt.
+ * The hardware timer handles only one outstading interrupt request at a
+ * time per core (except for WAKEUP_HANDLING_CORE in the unified mode), so a new
+ * call from a core before the interrupt expires cancels the previous one for
+ * that core.
+ *
+ * \param ns the relative time when the interrupt will be fired on the core
+ * that is calling this function. This value thus represent a time duration and
+ * NOT a time point. The time conversion from nanoseconds to ticks does not need
+ * to be very precise and clock skew is tolerated.
+ *
+ * The fired interrupt must invoke the scheduler on the core the function was
+ * called from.
+ *
+ * \warning The timer model is one shot, and NOT periodic. Once the scheduler is
+ * called it must NOT be called again unless IRQosTimerSetPreemption() is
+ * called again to schedule another interrupt.
+ */
+void IRQosTimerSetPreemption(unsigned int ns) noexcept;
+#endif //defined(WITH_SMP) || !defined(OS_TIMER_MODEL_UNIFIED)
+
+/**
+ * \internal
+ * Set the next timekeeping/thread wakeup interrupt.
+ * This function is used by the kernel, and should not be used by end users.
+ * Can be called with interrupts disabled or within an interrupt.
+ * The hardware timer handles only one outstading interrupt request at a
+ * time, so a new call before the interrupt expires cancels the previous one.
+ * On multi-core architectures, this function can called by any core but shall
+ * only set the interrupt that will run on the WAKEUP_HANDLING_CORE.
+ *
+ * \param ns the absolute time when the interrupt will be fired, in nanoseconds.
+ * This value thus represent a time point and NOT a duration.
+ * When the interrupt fires, it shall call the
+ * \code
+ * void IRQwakeThreads(long long currentTime);
+ * \endcode
+ * function defined in thread.cpp. This function shall be called from the
+ * WAKEUP_HANDLING_CORE.
+ * \warning IRQwakeThreads must NOT be called before the time specified in ns
+ * is reached. Thus, the parameter currentTime passed to IRQwakeThreads must
+ * be equal or greater than ns. A device driver that implements the os_timer and
+ * fails to meet this requirement will break the scheduler!
+ * The time conversion from nanoseconds to ticks must thus be precise, using the
+ * TimeConversion class is recommended.
+ *
+ * \warning The timer model is one shot, and NOT periodic. Once the handler
+ * function is called, it must NOT be called again unless
+ * IRQosTimerSetInterrupt() is called again to schedule another interrupt.
+ */
+void IRQosTimerSetInterrupt(long long ns) noexcept;
+
+/**
+ * \return if the last timer interrupt time that was scheduled with
+ * IRQosTimerSetInterrupt() is still pending, return the abolute time in
+ * nanoseconds of the pending interrupt. If the interrupt time already passed
+ * no further interrupt has been set, return numeric_limits<long long>::max()
+ */
+long long IRQosTimerGetInterrupt() noexcept;
+
+/**
+ * \internal
+ * Set the current system time.
+ * It is used by the kernel, and should not be used by end users.
+ * Used to adjust the time for example if the system clock was stopped due to
+ * entering deep sleep.
+ * Can be called with interrupts disabled or within an interrupt.
+ * \param ns value to set the hardware timer to. Note that the timer can
+ * only be set to a higher value, never to a lower one, as the OS timer
+ * needs to be monotonic.
+ * If an interrupt has been set with IRQsetNextInterrupt, it needs to be
+ * moved accordingly or fired immediately if the timer advance causes it
+ * to be in the past.
+ */ 
+void IRQosTimerSetTime(long long ns) noexcept;
+
+/**
+ * \internal
+ * It is used by the kernel, and should not be used by end users.
+ * \return the timer frequency in Hz.
+ * If a prescaler is used, it should be taken into account, the returned
+ * value should be equal to the frequency at which the timer increments in
+ * an observable way through IRQgetCurrentTime()
+ */
+unsigned int osTimerGetFrequency();
+
+/**
+ * Helper class providing a generic implementation capable of providing time
+ * in nanoseconds starting from a hardware timer.
+ * It works by first extending the timer counter to 64 bit in software through
+ * an algorithm called the "pending bit trick" and then using TimeConversion to
+ * turn the timer ticks to nanoseconds.
+ * 
+ * This class is not meant to be instantiated directly, but rather used as a
+ * base class by means of the C++ curiously recurring template pattern.
+ * In the derived class you need to implement function to perform
+ * platform-specific functions on the hardware timer, as shown by this example
+ * code.
+ * \code
+ * class MyHwTimer : public TimerAdapter<MyHwTimer, insert timer bits here>
+ * {
+ * public:
+ *     static inline unsigned int IRQgetTimerCounter() {}
+ *     static inline void IRQsetTimerCounter(unsigned int v) {}
+ * 
+ *     static inline unsigned int IRQgetTimerMatchReg() {}
+ *     static inline void IRQsetTimerMatchReg(unsigned int v) {}
+ * 
+ *     static inline bool IRQgetOverflowFlag() {}
+ *     static inline void IRQclearOverflowFlag() {}
+ *     
+ *     static inline bool IRQgetMatchFlag() {}
+ *     static inline void IRQclearMatchFlag() {}
+ *     
+ *     static inline void IRQforcePendingIrq() {}
+ * 
+ *     static inline void IRQstopTimer() {}
+ *     static inline void IRQstartTimer() {}
+ * 
+ *     static unsigned int IRQTimerFrequency() {}
+ * 
+ *     void IRQinitTimer() {}
+ * };
+ * \endcode
+ * 
+ * \tparam D the derived class (see curiously recurring template pattern)
+ * \tparam bits the bits of the underlying hardware timer, up to 32 bit.
+ * \tparam quirkAdvance some timers don't like being set very close to the
+ * actual interrupt time. If this is the case set this parameter to the minimum
+ * number of ticks in the future the timer must be set, otherwise keep at 0 
+ */
+template<typename D, unsigned bits, unsigned quirkAdvance=0>
+class TimerAdapter
+{
+public:
+    //Note that if you have a 64 bit timer you don't need this code at all
+    static_assert(bits<=32, "Support for larger timers not implemented");
+    static constexpr unsigned long long upperIncr=(1LL<<bits);
+    static constexpr unsigned long long lowerMask=upperIncr-1;
+    static constexpr unsigned long long upperMask=0xFFFFFFFFFFFFFFFFLL-lowerMask;
+    
+    long long upperTimeTick=0; /// Extended timer counter (upper bits)
+    /// Extended interrupt time point. If the interrupt is set we only use the
+    /// upper bits and the lower bits are 0. If the interrupt is not set we use
+    /// all bits to force the value to be return numeric_limits<long long>::max()
+    long long upperIrqTick=0x7FFFFFFFFFFFFFFFLL;
+    long long irqNs=0x7FFFFFFFFFFFFFFFLL;
+    miosix::TimeConversion tc;
+    bool lateIrq=false;
+    
+    /**
+     * \return the current time in ticks
+     */
+    inline long long IRQgetTimeTick()
+    {
+        // THE PENDING BIT TRICK, version 2
+        // This algorithm allows to extend in software an N bit timer to a 64bit
+        // one. The basic idea is this: the lower bits of the 64bit timer are
+        // kept by the counter register of the timer, while the upper bits are
+        // kept in a software variable. When the hardware timer overflows, an
+        // interrupt is used to update the upper bits.
+        // Reading the timer may appear to be doable by just an OR operation
+        // between the software variable and the hardware counter, but is
+        // actually way trickier than it seems, because user code may:
+        // 1 disable interrupts,
+        // 2 spend a little time with interrupts disabled,
+        // 3 call this function.
+        // Now, if a timer overflow occurs while interrupts are disabled, the
+        // upper bits have not yet been updated by the overflow interrupt, so
+        // we would return the wrong time.
+        // To fix this, we check the timer overflow pending bit, and if it is
+        // set we return the time adjusted accordingly. This almost works, the
+        // last issue to fix is that reading the timer counter and the pending
+        // bit is not an atomic operation, and the counter may roll over exactly
+        // at that point in time. In this case we must not increment the upper
+        // bits at all. To solve this, we read the timer a second time to see if
+        // it had rolled over.
+        // This is the pending bit trick, that in a nutshell uses the overflow
+        // pending flag as an extra timer bit, and accounts for the
+        // impossibility to atomically read the timer counter and pending flag.
+        // Note that this algorithm imposes a limit on the maximum time
+        // interrupts can be disabled, equals to one hardware timer period minus
+        // the time between the two timer reads in this algorithm.
+        unsigned int counter=D::IRQgetTimerCounter();
+        if(D::IRQgetOverflowFlag() && D::IRQgetTimerCounter()>=counter)
+            return (upperTimeTick | static_cast<long long>(counter)) + upperIncr;
+        return upperTimeTick | static_cast<long long>(counter);
+    }
+    
+    /**
+     * \return if the last interrupt time that was scheduled is still pending,
+     * return the abolute time in ticks of the pending interrupt.
+     * If the interrupt time already passed no further interrupt has been set,
+     * return numeric_limits<long long>::max()
+     */
+    inline long long IRQgetIrqTick()
+    {
+        return upperIrqTick | D::IRQgetTimerMatchReg();
+    }
+    
+    /**
+     * \return the current time in nanoseconds
+     */
+    inline long long IRQgetTimeNs()
+    {
+        return tc.tick2ns(IRQgetTimeTick());
+    }
+    
+    /**
+     * \return if the last interrupt time that was scheduled is still pending,
+     * return the abolute time in nanoseconds of the pending interrupt.
+     * If the interrupt time already passed no further interrupt has been set,
+     * return numeric_limits<long long>::max()
+     */
+    inline long long IRQgetIrqNs()
+    {
+        return irqNs;
+    }
+    
+    /**
+     * Set the current time
+     * \param ns absolute time in nanoseconds, can only be greater than the
+     * current time
+     */
+    void IRQsetTimeNs(long long ns)
+    {
+        //Normally we never stop the timer not to accumulate clock skew,
+        //but here we're asked to introduce a clock jump anyway
+        D::IRQstopTimer();
+        long long oldTick = IRQgetTimeTick();
+        long long tick = tc.ns2tick(ns);
+        if(tick>oldTick)
+        {
+            upperTimeTick = tick & upperMask;
+            D::IRQsetTimerCounter(static_cast<unsigned int>(tick & lowerMask));
+            D::IRQclearOverflowFlag();
+            //Adjust also when the next interrupt will be fired, if it is set
+            long long nextIrqTick = IRQgetIrqTick();
+            if(nextIrqTick!=0x7FFFFFFFFFFFFFFFLL && nextIrqTick>oldTick)
+            {
+                //Avoid using IRQsetIrqTick(nextIrqTick) as in some weird timers
+                //IRQgetTimeTick() does not work after setting the timer counter
+                //and before starting the timer (ATsam4l is an example)
+                auto tick2 = nextIrqTick + quirkAdvance;
+                upperIrqTick = tick2 & upperMask;
+                D::IRQsetTimerMatchReg(static_cast<unsigned int>(tick2 & lowerMask));
+                if(tick >= nextIrqTick)
+                {
+                    D::IRQforcePendingIrq();
+                    lateIrq=true;
+                }
+            }
+        }
+        D::IRQstartTimer();
+    }
+    
+    /**
+     * \internal
+     * Schedule the next os interrupt
+     *
+     * \warning this function is only provided to implement some low-level
+     * driver related to deep sleep, and should not be called directly to set
+     * the next interrupt for the scheduler, as it sidesteps setting the irqNs
+     * variable which is fundamental for the scheduler to function with low
+     * speed timers
+     * \param ns absolute time in ticks, must be > 0
+     */
+    inline void IRQsetIrqTick(long long tick)
+    {
+        auto tick2 = tick + quirkAdvance;
+        upperIrqTick = tick2 & upperMask;
+        D::IRQsetTimerMatchReg(static_cast<unsigned int>(tick2 & lowerMask));
+        if(IRQgetTimeTick() >= tick)
+        {
+            D::IRQforcePendingIrq();
+            lateIrq=true;
+        }
+    }
+    
+    /**
+     * Schedule the next os interrupt
+     * \param ns absolute time in nanoseconds, must be > 0
+     */
+    inline void IRQsetIrqNs(long long ns)
+    {
+        irqNs=ns;
+        IRQsetIrqTick(tc.ns2tick(ns));
+    }
+    
+    /**
+     * Must be called by the timer interrupt routine when writing the driver
+     * for a particular timer. It clears the pending flag and calls the os as
+     * needed.
+     */
+    inline void IRQhandler()
+    {
+        if(D::IRQgetMatchFlag() || lateIrq)
+        {
+            D::IRQclearMatchFlag();
+            long long tick=IRQgetTimeTick();
+            if(tick >= IRQgetIrqTick() || lateIrq)
+            {
+                lateIrq=false;
+
+                #ifndef WITH_RTC_AS_OS_TIMER
+                long long now=irqNs;
+                irqNs=upperIrqTick=0x7FFFFFFFFFFFFFFFLL;
+                IRQwakeThreads(now);
+                #else //WITH_RTC_AS_OS_TIMER
+                // Timeconversion error is less than 2 ticks, but with the low
+                // frequency of the RTC this error occasionally causes an early
+                // wakeup with an appreciable time error. In this case retry the
+                // next tick. When developing new os_timer drivers remove this
+                // code to make sure it does not happen systematically
+                long long now=tc.tick2ns(tick);
+                if(now<irqNs) IRQsetIrqTick(tick+1);
+                else {
+                    irqNs=upperIrqTick=0x7FFFFFFFFFFFFFFFLL;
+                    IRQwakeThreads(now);
+                }
+                #endif //WITH_RTC_AS_OS_TIMER
+            }
+        }
+        if(D::IRQgetOverflowFlag())
+        {
+            D::IRQclearOverflowFlag();
+            upperTimeTick += upperIncr;
+        }
+    }
+    
+    /**
+     * Initializes and starts the timer.
+     */
+    void IRQinit()
+    {
+        static_cast<D*>(this)->IRQinitTimer();
+        tc=TimeConversion(D::IRQTimerFrequency());
+        D::IRQstartTimer();
+    }
+
+    //From here, member functions only useful for specific type of drivers
+
+    /**
+     * Some weird timers forget to set the overflow flag when in deep sleep,
+     * (stm32f1 is an example), so provide a way to increment the upper part
+     * manually. You shouldn't need to call this unless you're dealing with a
+     * bug in a timer.
+     */
+    void IRQquirkIncrementUpperCounter()
+    {
+        upperTimeTick += upperIncr;
+    }
+
+    /**
+     * \param counter hardware timer value
+     * \return the current time in ticks, starting from the lower part
+     */
+    inline long long IRQgetTimeTickFromCounter(unsigned int counter)
+    {
+        if(D::IRQgetOverflowFlag() && D::IRQgetTimerCounter()>=counter)
+            return (upperTimeTick | static_cast<long long>(counter)) + upperIncr;
+        return upperTimeTick | static_cast<long long>(counter);
+    }
+};
+
+} //namespace miosix
+
+/**
+ * This macro is a shorthand for implementing the os timer interface in terms of
+ * the TimerAdapter class. Just declare this macro <b>inside the miosix
+ * namespace</b> passing it the TimerAdapter derived class instance.
+ * 
+ * \code
+ * namespace miosix {
+ * class MyHwTimer : public TimerAdapter<MyHwTimer, insert timer bits here>
+ * {
+ *     [...]
+ * };
+ * 
+ * static MyHwTimer timer;
+ * DEFAULT_OS_TIMER_INTERFACE_IMPLEMENTATION(timer);
+ * 
+ * void timerInterruptRoutine()
+ * {
+ *     timer.IRQhandler();
+ * }
+ * } //namespace miosix
+ * \endcode
+ */
+#define DEFAULT_OS_TIMER_INTERFACE_IMPLEMENTATION(timer) \
+long long getTime() noexcept                       \
+{                                                  \
+    FastGlobalIrqLock dLock;                       \
+    return timer.IRQgetTimeNs();                   \
+}                                                  \
+                                                   \
+long long IRQgetTime() noexcept                    \
+{                                                  \
+    return timer.IRQgetTimeNs();                   \
+}                                                  \
+                                                   \
+void IRQosTimerInit()                              \
+{                                                  \
+    timer.IRQinit();                               \
+}                                                  \
+                                                   \
+void IRQosTimerSetInterrupt(long long ns) noexcept \
+{                                                  \
+    timer.IRQsetIrqNs(ns);                         \
+}                                                  \
+                                                   \
+long long IRQosTimerGetInterrupt() noexcept        \
+{                                                  \
+    return timer.IRQgetIrqNs();                    \
+}                                                  \
+                                                   \
+void IRQosTimerSetTime(long long ns) noexcept      \
+{                                                  \
+    timer.IRQsetTimeNs(ns);                        \
+}                                                  \
+                                                   \
+unsigned int osTimerGetFrequency()                 \
+{                                                  \
+    FastGlobalIrqLock dLock;                       \
+    return timer.IRQTimerFrequency();              \
+}
+
+/**
+ * \}
+ */
+
+// Gated including of arch-specific functions to enable inlining
+#if !defined(OS_TIMER_MODEL_UNIFIED) && __ARM_ARCH>=6
+#include "arch/drivers/os_timer/arm_systick_os_timer_impl.h"
+#endif

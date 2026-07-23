@@ -33,13 +33,13 @@
 #include <interfaces/arch_registers.h>
 #include <interfaces/gpio.h>
 #include <interfaces/delays.h>
-#include <interfaces/bsp.h>
 /* Miosix kernel */
-#include <kernel/kernel.h>
+#include <kernel/thread.h>
+#include <kernel/lock.h>
 #include <kernel/sync.h>
 #include <kernel/queue.h>
 #include <kernel/cpu_time_counter.h>
 /* Utilities */
 #include <util/util.h>
 /* Settings */
-#include <config/miosix_settings.h>
+#include <miosix_settings.h>

@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2023 by Daniele Cattaneo                                *
+ *   Copyright (C) 2023,2025 by Daniele Cattaneo                           *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -27,7 +27,8 @@
 
 #pragma once
 
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
+#include "interfaces/cpu_const.h"
 
 #ifdef WITH_CPU_TIME_COUNTER
 
@@ -44,7 +45,7 @@ struct CPUTimeCounterPrivateThreadData
     /// Timestamp of the last context change to this thread
     long long lastActivation = 0;
     /// Cumulative amount of CPU time used by this thread
-    long long usedCpuTime = 0;
+    long long usedCpuTime[CPU_NUM_CORES] = {0};
     /// Next thread in the thread list used by CPUTimeCounter
     Thread *next = nullptr;
 };

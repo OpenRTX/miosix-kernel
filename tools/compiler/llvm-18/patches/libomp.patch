@@ -1,0 +1,650 @@
+diff --git a/openmp/runtime/cmake/config-ix.cmake b/openmp/runtime/cmake/config-ix.cmake
+index 76f471a44380..b0408d18bc6f 100644
+--- a/openmp/runtime/cmake/config-ix.cmake
++++ b/openmp/runtime/cmake/config-ix.cmake
+@@ -122,8 +122,11 @@ set(source_code "// check for _mm_malloc
+     int main() { void *ptr = _mm_malloc(sizeof(int) * 1000, 64); _mm_free(ptr); return 0; }")
+ check_cxx_source_compiles("${source_code}" LIBOMP_HAVE__MM_MALLOC)
+ set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQUIRED_FLAGS})
+-check_symbol_exists(aligned_alloc "stdlib.h" LIBOMP_HAVE_ALIGNED_ALLOC)
+-check_symbol_exists(posix_memalign "stdlib.h" LIBOMP_HAVE_POSIX_MEMALIGN)
++#TODO patch newlib
++#check_symbol_exists(aligned_alloc "stdlib.h" LIBOMP_HAVE_ALIGNED_ALLOC)
++#check_symbol_exists(posix_memalign "stdlib.h" LIBOMP_HAVE_POSIX_MEMALIGN)
++set(LIBOMP_HAVE_ALIGNED_ALLOC 0)
++set(LIBOMP_HAVE_POSIX_MEMALIGN 0)
+ check_symbol_exists(_aligned_malloc "malloc.h" LIBOMP_HAVE__ALIGNED_MALLOC)
+ 
+ # Check linker flags
+diff --git a/openmp/runtime/src/kmp.h b/openmp/runtime/src/kmp.h
+index 46ee4c9fba71..9b101ef5848c 100644
+--- a/openmp/runtime/src/kmp.h
++++ b/openmp/runtime/src/kmp.h
+@@ -69,6 +69,10 @@
+ #undef KMP_CANCEL_THREADS
+ #endif
+ 
++#if KMP_OS_MIOSIX
++#undef KMP_CANCEL_THREADS
++#endif
++
+ #if !KMP_OS_WASI
+ #include <signal.h>
+ #endif
+@@ -1328,9 +1332,9 @@ extern kmp_uint64 __kmp_now_nsec();
+ #if KMP_OS_WINDOWS
+ #define KMP_INIT_WAIT 64U /* initial number of spin-tests   */
+ #define KMP_NEXT_WAIT 32U /* susequent number of spin-tests */
+-#elif KMP_OS_LINUX
++#elif KMP_OS_LINUX || KMP_OS_MIOSIX
+ #define KMP_INIT_WAIT 1024U /* initial number of spin-tests   */
+-#define KMP_NEXT_WAIT 512U /* susequent number of spin-tests */
++#define KMP_NEXT_WAIT 512U /* subsequent number of spin-tests */
+ #elif KMP_OS_DARWIN
+ /* TODO: tune for KMP_OS_DARWIN */
+ #define KMP_INIT_WAIT 1024U /* initial number of spin-tests   */
+@@ -1705,7 +1709,7 @@ typedef HANDLE kmp_thread_t;
+ typedef DWORD kmp_key_t;
+ #endif /* KMP_OS_WINDOWS */
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+ typedef pthread_t kmp_thread_t;
+ typedef pthread_key_t kmp_key_t;
+ #endif
+@@ -2277,7 +2281,7 @@ typedef struct kmp_win32_cond {
+ } kmp_win32_cond_t;
+ #endif
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+ 
+ union KMP_ALIGN_CACHE kmp_cond_union {
+   double c_align;
+@@ -3046,7 +3050,7 @@ typedef struct KMP_ALIGN_CACHE kmp_base_info {
+   kmp_win32_mutex_t th_suspend_mx;
+   std::atomic<int> th_suspend_init;
+ #endif
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+   kmp_cond_align_t th_suspend_cv;
+   kmp_mutex_align_t th_suspend_mx;
+   std::atomic<int> th_suspend_init_count;
+@@ -3497,8 +3501,13 @@ extern int __kmp_gtid_mode; /* Method of getting gtid, values:
+ extern int
+     __kmp_adjust_gtid_mode; /* If true, adjust method based on #threads */
+ #ifdef KMP_TDATA_GTID
++#if KMP_OS_MIOSIX
++extern pthread_key_t __kmp_gtid_key;
++#define __kmp_gtid *reinterpret_cast<int*>(pthread_getspecific(__kmp_gtid_key))
++#else
+ extern KMP_THREAD_LOCAL int __kmp_gtid;
+ #endif
++#endif
+ extern int __kmp_tls_gtid_min; /* #threads below which use sp search for gtid */
+ extern int __kmp_foreign_tp; // If true, separate TP var for each foreign thread
+ #if KMP_ARCH_X86 || KMP_ARCH_X86_64
+@@ -4002,7 +4011,6 @@ extern void __kmp_common_destroy_gtid(int gtid);
+ #if KMP_OS_UNIX
+ extern void __kmp_register_atfork(void);
+ #endif
+-extern void __kmp_suspend_initialize(void);
+ extern void __kmp_suspend_initialize_thread(kmp_info_t *th);
+ extern void __kmp_suspend_uninitialize_thread(kmp_info_t *th);
+ 
+diff --git a/openmp/runtime/src/kmp_alloc.cpp b/openmp/runtime/src/kmp_alloc.cpp
+index fb1b0eb5f0fe..810046e16c19 100644
+--- a/openmp/runtime/src/kmp_alloc.cpp
++++ b/openmp/runtime/src/kmp_alloc.cpp
+@@ -1357,6 +1357,7 @@ void __kmp_fini_memkind() {
+ }
+ 
+ void __kmp_init_target_mem() {
++#if KMP_DYNAMIC_LIB
+   *(void **)(&kmp_target_alloc_host) = KMP_DLSYM("llvm_omp_target_alloc_host");
+   *(void **)(&kmp_target_alloc_shared) =
+       KMP_DLSYM("llvm_omp_target_alloc_shared");
+@@ -1374,6 +1375,7 @@ void __kmp_init_target_mem() {
+   // lock/pin and unlock/unpin target calls
+   *(void **)(&kmp_target_lock_mem) = KMP_DLSYM("llvm_omp_target_lock_mem");
+   *(void **)(&kmp_target_unlock_mem) = KMP_DLSYM("llvm_omp_target_unlock_mem");
++#endif
+ }
+ 
+ omp_allocator_handle_t __kmpc_init_allocator(int gtid, omp_memspace_handle_t ms,
+diff --git a/openmp/runtime/src/kmp_environment.cpp b/openmp/runtime/src/kmp_environment.cpp
+index 4def6ea9ac20..3d2e40467f44 100644
+--- a/openmp/runtime/src/kmp_environment.cpp
++++ b/openmp/runtime/src/kmp_environment.cpp
+@@ -55,7 +55,7 @@
+ #include "kmp_os.h" // KMP_OS_*.
+ #include "kmp_str.h" // __kmp_str_*().
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+ #include <stdlib.h> // getenv, setenv, unsetenv.
+ #include <string.h> // strlen, strcpy.
+ #if KMP_OS_DARWIN
+@@ -85,7 +85,7 @@ char *__kmp_env_get(char const *name) {
+ 
+   char *result = NULL;
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+   char const *value = getenv(name);
+   if (value != NULL) {
+     size_t len = KMP_STRLEN(value) + 1;
+@@ -150,7 +150,7 @@ void __kmp_env_free(char const **value) {
+ 
+ int __kmp_env_exists(char const *name) {
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+   char const *value = getenv(name);
+   return ((value == NULL) ? (0) : (1));
+ #elif KMP_OS_WINDOWS
+@@ -172,7 +172,7 @@ int __kmp_env_exists(char const *name) {
+ 
+ void __kmp_env_set(char const *name, char const *value, int overwrite) {
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+   int rc = setenv(name, value, overwrite);
+   if (rc != 0) {
+     // Dead code. I tried to put too many variables into Linux* OS
+@@ -209,7 +209,7 @@ void __kmp_env_set(char const *name, char const *value, int overwrite) {
+ 
+ void __kmp_env_unset(char const *name) {
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+   unsetenv(name);
+ #elif KMP_OS_WINDOWS
+   BOOL rc = SetEnvironmentVariable(name, NULL);
+@@ -448,6 +448,11 @@ void __kmp_env_blk_init(kmp_env_blk_t *block, // M: Block to initialize.
+       ___kmp_env_blk_parse_windows(block, mem);
+       FreeEnvironmentStrings(mem);
+     }
++#elif KMP_OS_MIOSIX
++    // Unsupported
++    block->bulk = nullptr;
++    block->vars = nullptr;
++    block->count=0;
+ #else
+ #error Unknown or unsupported OS.
+ #endif
+diff --git a/openmp/runtime/src/kmp_ftn_cdecl.cpp b/openmp/runtime/src/kmp_ftn_cdecl.cpp
+index cf1d429a915c..961506004217 100644
+--- a/openmp/runtime/src/kmp_ftn_cdecl.cpp
++++ b/openmp/runtime/src/kmp_ftn_cdecl.cpp
+@@ -17,7 +17,7 @@
+ #if defined KMP_WIN_CDECL || !KMP_DYNAMIC_LIB
+ #define KMP_FTN_ENTRIES KMP_FTN_UPPER
+ #endif
+-#elif KMP_OS_UNIX
++#elif KMP_OS_UNIX || KMP_OS_MIOSIX
+ #define KMP_FTN_ENTRIES KMP_FTN_PLAIN
+ #endif
+ 
+diff --git a/openmp/runtime/src/kmp_ftn_entry.h b/openmp/runtime/src/kmp_ftn_entry.h
+index 713561734c48..b69e76002c3e 100644
+--- a/openmp/runtime/src/kmp_ftn_entry.h
++++ b/openmp/runtime/src/kmp_ftn_entry.h
+@@ -582,7 +582,7 @@ int FTN_STDCALL KMP_EXPAND_NAME(FTN_GET_THREAD_NUM)(void) {
+   int gtid;
+ 
+ #if KMP_OS_DARWIN || KMP_OS_DRAGONFLY || KMP_OS_FREEBSD || KMP_OS_NETBSD ||    \
+-    KMP_OS_OPENBSD || KMP_OS_HURD || KMP_OS_SOLARIS || KMP_OS_AIX
++    KMP_OS_OPENBSD || KMP_OS_HURD || KMP_OS_SOLARIS || KMP_OS_AIX || KMP_OS_MIOSIX
+   gtid = __kmp_entry_gtid();
+ #elif KMP_OS_WINDOWS
+   if (!__kmp_init_parallel ||
+diff --git a/openmp/runtime/src/kmp_global.cpp b/openmp/runtime/src/kmp_global.cpp
+index 5017cd3de4be..4e3539c3cece 100644
+--- a/openmp/runtime/src/kmp_global.cpp
++++ b/openmp/runtime/src/kmp_global.cpp
+@@ -183,7 +183,22 @@ int __kmp_gtid_mode = 0; /* select method to get gtid based on #threads */
+ int __kmp_adjust_gtid_mode = TRUE;
+ #endif /* KMP_OS_LINUX && defined(KMP_TDATA_GTID) */
+ #ifdef KMP_TDATA_GTID
++#if KMP_OS_MIOSIX
++#include <pthread.h>
++pthread_key_t __kmp_gtid_key;
++class key_initializer {
++public:
++  key_initializer() {
++    pthread_key_create(&__kmp_gtid_key, [](void* ptr){ delete reinterpret_cast<int*>(ptr); });
++  }
++  ~key_initializer() {
++    pthread_key_delete(__kmp_gtid_key);
++  }
++};
++static key_initializer k;
++#else
+ KMP_THREAD_LOCAL int __kmp_gtid = KMP_GTID_DNE;
++#endif
+ #endif /* KMP_TDATA_GTID */
+ int __kmp_tls_gtid_min = INT_MAX;
+ int __kmp_foreign_tp = TRUE;
+diff --git a/openmp/runtime/src/kmp_i18n.cpp b/openmp/runtime/src/kmp_i18n.cpp
+index a164aa180dd4..819a709fd72b 100644
+--- a/openmp/runtime/src/kmp_i18n.cpp
++++ b/openmp/runtime/src/kmp_i18n.cpp
+@@ -213,6 +213,13 @@ char const *__kmp_i18n_catgets(kmp_i18n_id_t id) {
+ 
+ #endif // KMP_OS_UNIX
+ 
++#if KMP_OS_MIOSIX
++#define KMP_I18N_OK
++void __kmp_i18n_catclose() {}
++char const *__kmp_i18n_catgets(kmp_i18n_id_t id) { return no_message_available; }
++void __kmp_i18n_do_catopen() {}
++#endif
++
+ /* Windows* OS part. */
+ 
+ #if KMP_OS_WINDOWS
+@@ -635,7 +642,7 @@ kmp_msg_t __kmp_msg_format(unsigned id_arg, ...) {
+   // default promotions.
+   kmp_i18n_id_t id = (kmp_i18n_id_t)id_arg;
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+   // On Linux* OS and OS X*, printf() family functions process parameter
+   // numbers, for example:  "%2$s %1$s".
+   __kmp_str_buf_vprint(&buffer, __kmp_i18n_catgets(id), args);
+@@ -710,7 +717,8 @@ static char *sys_error(int err) {
+ 
+ #if (defined(__GLIBC__) && defined(_GNU_SOURCE)) ||                            \
+     (defined(__BIONIC__) && defined(_GNU_SOURCE) &&                            \
+-     __ANDROID_API__ >= __ANDROID_API_M__)
++     __ANDROID_API__ >= __ANDROID_API_M__) ||                                  \
++    (defined(__NEWLIB_H__) && defined(_GNU_SOURCE))
+   // GNU version of strerror_r.
+ 
+   char buffer[2048];
+diff --git a/openmp/runtime/src/kmp_os.h b/openmp/runtime/src/kmp_os.h
+index 9cd0aefaea2d..36bf394f157b 100644
+--- a/openmp/runtime/src/kmp_os.h
++++ b/openmp/runtime/src/kmp_os.h
+@@ -177,8 +177,24 @@ typedef unsigned long long kmp_uint64;
+ #define KMP_UINT64_SPEC "llu"
+ #endif /* KMP_OS_UNIX */
+ 
++#if KMP_ARCH_ARMV6M
++#define KMP_END_OF_LINE "\n"
++typedef char kmp_int8;
++typedef unsigned char kmp_uint8;
++typedef short kmp_int16;
++typedef unsigned short kmp_uint16;
++typedef int kmp_int32;
++typedef unsigned int kmp_uint32;
++typedef long long kmp_int64;
++typedef unsigned long long kmp_uint64;
++#define KMP_INT32_SPEC "d"
++#define KMP_UINT32_SPEC "u"
++#define KMP_INT64_SPEC "lld"
++#define KMP_UINT64_SPEC "llu"
++#endif /* KMP_ARCH_ARMV6M */
++
+ #if KMP_ARCH_X86 || KMP_ARCH_ARM || KMP_ARCH_MIPS || KMP_ARCH_WASM ||          \
+-    KMP_ARCH_PPC
++    KMP_ARCH_PPC || KMP_ARCH_ARMV6M
+ #define KMP_SIZE_T_SPEC KMP_UINT32_SPEC
+ #elif KMP_ARCH_X86_64 || KMP_ARCH_PPC64 || KMP_ARCH_AARCH64 ||                 \
+     KMP_ARCH_MIPS64 || KMP_ARCH_RISCV64 || KMP_ARCH_LOONGARCH64 ||             \
+@@ -217,8 +233,8 @@ typedef kmp_uint32 kmp_uint;
+ #define KMP_INT_MIN ((kmp_int32)0x80000000)
+ 
+ // stdarg handling
+-#if (KMP_ARCH_ARM || KMP_ARCH_X86_64 || KMP_ARCH_AARCH64 || KMP_ARCH_WASM) &&  \
+-    (KMP_OS_FREEBSD || KMP_OS_LINUX || KMP_OS_WASI)
++#if (KMP_ARCH_ARM || KMP_ARCH_X86_64 || KMP_ARCH_AARCH64 || KMP_ARCH_WASM || KMP_ARCH_ARMV6M) &&  \
++    (KMP_OS_FREEBSD || KMP_OS_LINUX || KMP_OS_WASI || KMP_OS_MIOSIX)
+ typedef va_list *kmp_va_list;
+ #define kmp_va_deref(ap) (*(ap))
+ #define kmp_va_addr_of(ap) (&(ap))
+@@ -1292,7 +1308,7 @@ bool __kmp_atomic_compare_store_rel(std::atomic<T> *p, T expected, T desired) {
+ extern void *__kmp_lookup_symbol(const char *name, bool next = false);
+ #define KMP_DLSYM(name) __kmp_lookup_symbol(name)
+ #define KMP_DLSYM_NEXT(name) __kmp_lookup_symbol(name, true)
+-#elif KMP_OS_WASI
++#elif KMP_OS_WASI || KMP_OS_MIOSIX
+ #define KMP_DLSYM(name) nullptr
+ #define KMP_DLSYM_NEXT(name) nullptr
+ #else
+diff --git a/openmp/runtime/src/kmp_platform.h b/openmp/runtime/src/kmp_platform.h
+index c06f46db2d49..b51469c93ed4 100644
+--- a/openmp/runtime/src/kmp_platform.h
++++ b/openmp/runtime/src/kmp_platform.h
+@@ -26,6 +26,7 @@
+ #define KMP_OS_SOLARIS 0
+ #define KMP_OS_WASI 0
+ #define KMP_OS_UNIX 0 /* disjunction of KMP_OS_LINUX, KMP_OS_DARWIN etc. */
++#define KMP_OS_MIOSIX 1
+ 
+ #ifdef _WIN32
+ #undef KMP_OS_WINDOWS
+@@ -87,9 +88,14 @@
+ #define KMP_OS_AIX 1
+ #endif
+ 
++#ifdef _MIOSIX
++#undef KMP_OS_MIOSIX
++#define KMP_OS_MIOSIX 1
++#endif
++
+ #if (1 != KMP_OS_LINUX + KMP_OS_DRAGONFLY + KMP_OS_FREEBSD + KMP_OS_NETBSD +   \
+               KMP_OS_OPENBSD + KMP_OS_DARWIN + KMP_OS_WINDOWS + KMP_OS_HURD +  \
+-              KMP_OS_SOLARIS + KMP_OS_WASI + KMP_OS_AIX)
++              KMP_OS_SOLARIS + KMP_OS_WASI + KMP_OS_AIX + KMP_OS_MIOSIX)
+ #error Unknown OS
+ #endif
+ 
+@@ -115,6 +121,13 @@
+ #define KMP_ARCH_LOONGARCH64 0
+ #define KMP_ARCH_VE 0
+ #define KMP_ARCH_S390X 0
++#define KMP_ARCH_ARMV6M 0
++
++/* Cortex-M (ARMv6-M) support */
++#if defined(__ARM_ARCH_6M__) || defined(__ARM_ARCH_6SM__) || defined(__ARM_ARCH_6S__)
++#undef KMP_ARCH_ARMV6M
++#define KMP_ARCH_ARMV6M 1
++#endif
+ 
+ #if KMP_OS_WINDOWS
+ #if defined(_M_AMD64) || defined(__x86_64)
+@@ -254,7 +267,7 @@
+ #if (1 != KMP_ARCH_X86 + KMP_ARCH_X86_64 + KMP_ARCH_ARM + KMP_ARCH_PPC64 +     \
+               KMP_ARCH_AARCH64 + KMP_ARCH_MIPS + KMP_ARCH_MIPS64 +             \
+               KMP_ARCH_RISCV64 + KMP_ARCH_LOONGARCH64 + KMP_ARCH_VE +          \
+-              KMP_ARCH_S390X + KMP_ARCH_WASM + KMP_ARCH_PPC)
++              KMP_ARCH_S390X + KMP_ARCH_WASM + KMP_ARCH_PPC + KMP_ARCH_ARMV6M)
+ #error Unknown or unsupported architecture
+ #endif
+ 
+diff --git a/openmp/runtime/src/kmp_runtime.cpp b/openmp/runtime/src/kmp_runtime.cpp
+index fc5e8405a415..b606fad3663d 100644
+--- a/openmp/runtime/src/kmp_runtime.cpp
++++ b/openmp/runtime/src/kmp_runtime.cpp
+@@ -3980,7 +3980,13 @@ int __kmp_register_root(int initial_thread) {
+ #endif /* USE_ITT_BUILD */
+ 
+ #ifdef KMP_TDATA_GTID
++#if KMP_OS_MIOSIX
++  int *val_ptr = new int;
++  *val_ptr = gtid;
++  pthread_setspecific(__kmp_gtid_key, val_ptr);
++#else
+   __kmp_gtid = gtid;
++#endif
+ #endif
+   __kmp_create_worker(gtid, root_thread, __kmp_stksize);
+   KMP_DEBUG_ASSERT(__kmp_gtid_get_specific() == gtid);
+@@ -7559,8 +7565,6 @@ void __kmp_parallel_initialize(void) {
+ #endif
+ #endif
+ 
+-  __kmp_suspend_initialize();
+-
+ #if defined(USE_LOAD_BALANCE)
+   if (__kmp_global.g.g_dynamic_mode == dynamic_default) {
+     __kmp_global.g.g_dynamic_mode = dynamic_load_balance;
+@@ -8929,11 +8933,11 @@ __kmp_determine_reduction_method(
+        // KMP_OS_SOLARIS || KMP_OS_WASI || KMP_OS_AIX
+ 
+ #elif KMP_ARCH_X86 || KMP_ARCH_ARM || KMP_ARCH_AARCH || KMP_ARCH_MIPS ||       \
+-    KMP_ARCH_WASM || KMP_ARCH_PPC
++    KMP_ARCH_WASM || KMP_ARCH_PPC || KMP_ARCH_ARMV6M
+ 
+ #if KMP_OS_LINUX || KMP_OS_DRAGONFLY || KMP_OS_FREEBSD || KMP_OS_NETBSD ||     \
+     KMP_OS_OPENBSD || KMP_OS_WINDOWS || KMP_OS_HURD || KMP_OS_SOLARIS ||       \
+-    KMP_OS_WASI || KMP_OS_AIX
++    KMP_OS_WASI || KMP_OS_AIX || KMP_OS_MIOSIX
+ 
+     // basic tuning
+ 
+diff --git a/openmp/runtime/src/kmp_utility.cpp b/openmp/runtime/src/kmp_utility.cpp
+index f901eaca92f4..536310e65726 100644
+--- a/openmp/runtime/src/kmp_utility.cpp
++++ b/openmp/runtime/src/kmp_utility.cpp
+@@ -298,7 +298,7 @@ void __kmp_expand_host_name(char *buffer, size_t size) {
+   KMP_STRCPY_S(buffer, size, unknown);
+ #else
+   buffer[size - 2] = 0;
+-  if (gethostname(buffer, size) || buffer[size - 2] != 0)
++  if (/*gethostname(buffer, size) || */buffer[size - 2] != 0)
+     KMP_STRCPY_S(buffer, size, unknown);
+ #endif
+ }
+diff --git a/openmp/runtime/src/kmp_wrapper_getpid.h b/openmp/runtime/src/kmp_wrapper_getpid.h
+index d31c6e80f75d..63aee52a3a70 100644
+--- a/openmp/runtime/src/kmp_wrapper_getpid.h
++++ b/openmp/runtime/src/kmp_wrapper_getpid.h
+@@ -13,11 +13,11 @@
+ #ifndef KMP_WRAPPER_GETPID_H
+ #define KMP_WRAPPER_GETPID_H
+ 
+-#if KMP_OS_UNIX
++#if KMP_OS_UNIX || KMP_OS_MIOSIX
+ 
+ // On Unix-like systems (Linux* OS and OS X*) getpid() is declared in standard
+ // headers.
+-#if !defined(KMP_OS_AIX)
++#if !defined(KMP_OS_AIX) && !defined(KMP_OS_MIOSIX)
+ #include <sys/syscall.h>
+ #endif
+ #include <sys/types.h>
+@@ -33,7 +33,7 @@
+ #define __kmp_gettid() _lwp_self()
+ #elif KMP_OS_OPENBSD
+ #define __kmp_gettid() getthrid()
+-#elif KMP_OS_AIX
++#elif KMP_OS_AIX || KMP_OS_MIOSIX
+ #include <pthread.h>
+ #define __kmp_gettid() pthread_self()
+ #elif defined(SYS_gettid)
+diff --git a/openmp/runtime/src/kmp_wrapper_malloc.h b/openmp/runtime/src/kmp_wrapper_malloc.h
+index 1f75e88a23b2..ff8bd3d9f875 100644
+--- a/openmp/runtime/src/kmp_wrapper_malloc.h
++++ b/openmp/runtime/src/kmp_wrapper_malloc.h
+@@ -97,7 +97,7 @@
+ #endif
+ #elif KMP_OS_DRAGONFLY || KMP_OS_FREEBSD || KMP_OS_NETBSD || KMP_OS_OPENBSD
+ // Declared in "stdlib.h".
+-#elif KMP_OS_UNIX
++#elif KMP_OS_UNIX || KMP_OS_MIOSIX
+ #include <alloca.h> // Linux* OS and OS X*: alloc() declared in "alloca".
+ #else
+ #error Unknown or unsupported OS.
+diff --git a/openmp/runtime/src/z_Linux_util.cpp b/openmp/runtime/src/z_Linux_util.cpp
+index b9ff96873702..9ca8b7fc5112 100644
+--- a/openmp/runtime/src/z_Linux_util.cpp
++++ b/openmp/runtime/src/z_Linux_util.cpp
+@@ -29,7 +29,7 @@
+ #include <semaphore.h>
+ #endif // KMP_OS_LINUX
+ #include <sys/resource.h>
+-#if !KMP_OS_AIX
++#if !KMP_OS_AIX && !KMP_OS_MIOSIX
+ #include <sys/syscall.h>
+ #endif
+ #include <sys/time.h>
+@@ -99,9 +99,6 @@ static int __kmp_init_runtime = FALSE;
+ 
+ static int __kmp_fork_count = 0;
+ 
+-static pthread_condattr_t __kmp_suspend_cond_attr;
+-static pthread_mutexattr_t __kmp_suspend_mutex_attr;
+-
+ static kmp_cond_align_t __kmp_wait_cv;
+ static kmp_mutex_align_t __kmp_wait_mx;
+ 
+@@ -508,8 +505,14 @@ static void *__kmp_launch_worker(void *thr) {
+   gtid = ((kmp_info_t *)thr)->th.th_info.ds.ds_gtid;
+   __kmp_gtid_set_specific(gtid);
+ #ifdef KMP_TDATA_GTID
++#if KMP_OS_MIOSIX
++  int *val_ptr = new int;
++  *val_ptr = gtid;
++  pthread_setspecific(__kmp_gtid_key, val_ptr);
++#else
+   __kmp_gtid = gtid;
+ #endif
++#endif
+ #if KMP_STATS_ENABLED
+   // set thread local index to point to thread-specific stats
+   __kmp_stats_thread_ptr = ((kmp_info_t *)thr)->th.th_stats;
+@@ -588,7 +591,13 @@ static void *__kmp_launch_monitor(void *thr) {
+   /* register us as the monitor thread */
+   __kmp_gtid_set_specific(KMP_GTID_MONITOR);
+ #ifdef KMP_TDATA_GTID
++#if KMP_OS_MIOSIX
++  int *val_ptr = new int;
++  *val_ptr = KMP_GTID_MONITOR;
++  pthread_setspecific(__kmp_gtid_key, val_ptr);
++#else
+   __kmp_gtid = KMP_GTID_MONITOR;
++#endif
+ #endif
+ 
+   KMP_MB();
+@@ -1360,7 +1369,7 @@ static void __kmp_atfork_child(void) {
+ 
+ void __kmp_register_atfork(void) {
+   if (__kmp_need_register_atfork) {
+-#if !KMP_OS_WASI
++#if !KMP_OS_WASI && !KMP_OS_MIOSIX
+     int status = pthread_atfork(__kmp_atfork_prepare, __kmp_atfork_parent,
+                                 __kmp_atfork_child);
+     KMP_CHECK_SYSFAIL("pthread_atfork", status);
+@@ -1369,14 +1378,6 @@ void __kmp_register_atfork(void) {
+   }
+ }
+ 
+-void __kmp_suspend_initialize(void) {
+-  int status;
+-  status = pthread_mutexattr_init(&__kmp_suspend_mutex_attr);
+-  KMP_CHECK_SYSFAIL("pthread_mutexattr_init", status);
+-  status = pthread_condattr_init(&__kmp_suspend_cond_attr);
+-  KMP_CHECK_SYSFAIL("pthread_condattr_init", status);
+-}
+-
+ void __kmp_suspend_initialize_thread(kmp_info_t *th) {
+   int old_value = KMP_ATOMIC_LD_RLX(&th->th.th_suspend_init_count);
+   int new_value = __kmp_fork_count + 1;
+@@ -1392,11 +1393,9 @@ void __kmp_suspend_initialize_thread(kmp_info_t *th) {
+   } else {
+     // Claim to be the initializer and do initializations
+     int status;
+-    status = pthread_cond_init(&th->th.th_suspend_cv.c_cond,
+-                               &__kmp_suspend_cond_attr);
++    status = pthread_cond_init(&th->th.th_suspend_cv.c_cond, nullptr);
+     KMP_CHECK_SYSFAIL("pthread_cond_init", status);
+-    status = pthread_mutex_init(&th->th.th_suspend_mx.m_mutex,
+-                                &__kmp_suspend_mutex_attr);
++    status = pthread_mutex_init(&th->th.th_suspend_mx.m_mutex, nullptr);
+     KMP_CHECK_SYSFAIL("pthread_mutex_init", status);
+     KMP_ATOMIC_ST_REL(&th->th.th_suspend_init_count, new_value);
+   }
+@@ -1798,6 +1797,7 @@ double __kmp_read_cpu_time(void) {
+ }
+ 
+ int __kmp_read_system_info(struct kmp_sys_info *info) {
++#if !KMP_OS_WASI && !KMP_OS_MIOSIX
+   int status;
+   struct rusage r_usage;
+ 
+@@ -1806,7 +1806,6 @@ int __kmp_read_system_info(struct kmp_sys_info *info) {
+   status = getrusage(RUSAGE_SELF, &r_usage);
+   KMP_CHECK_SYSFAIL_ERRNO("getrusage", status);
+ 
+-#if !KMP_OS_WASI
+   // The maximum resident set size utilized (in kilobytes)
+   info->maxrss = r_usage.ru_maxrss;
+   // The number of page faults serviced without any I/O
+@@ -1823,9 +1822,11 @@ int __kmp_read_system_info(struct kmp_sys_info *info) {
+   info->nvcsw = r_usage.ru_nvcsw;
+   // The number of times a context switch was forced
+   info->nivcsw = r_usage.ru_nivcsw;
+-#endif
+ 
+   return (status != 0);
++#else
++  return false;
++#endif
+ }
+ 
+ void __kmp_read_system_time(double *delta) {
+@@ -1858,7 +1859,7 @@ static int __kmp_get_xproc(void) {
+   __kmp_type_convert(sysconf(_SC_NPROCESSORS_CONF), &(r));
+ 
+ #elif KMP_OS_DRAGONFLY || KMP_OS_FREEBSD || KMP_OS_NETBSD || KMP_OS_OPENBSD || \
+-    KMP_OS_HURD || KMP_OS_SOLARIS || KMP_OS_WASI || KMP_OS_AIX
++    KMP_OS_HURD || KMP_OS_SOLARIS || KMP_OS_WASI || KMP_OS_AIX || KMP_OS_MIOSIX
+ 
+   __kmp_type_convert(sysconf(_SC_NPROCESSORS_ONLN), &(r));
+ 
+@@ -1909,8 +1910,6 @@ int __kmp_read_from_file(char const *path, char const *format, ...) {
+ 
+ void __kmp_runtime_initialize(void) {
+   int status;
+-  pthread_mutexattr_t mutex_attr;
+-  pthread_condattr_t cond_attr;
+ 
+   if (__kmp_init_runtime) {
+     return;
+@@ -1924,7 +1923,7 @@ void __kmp_runtime_initialize(void) {
+ 
+   __kmp_xproc = __kmp_get_xproc();
+ 
+-#if !KMP_32_BIT_ARCH
++#if !KMP_32_BIT_ARCH && !KMP_OS_MIOSIX
+   struct rlimit rlim;
+   // read stack size of calling thread, save it as default for worker threads;
+   // this should be done before reading environment variables
+@@ -1968,18 +1967,10 @@ void __kmp_runtime_initialize(void) {
+   status = pthread_key_create(&__kmp_gtid_threadprivate_key,
+                               __kmp_internal_end_dest);
+   KMP_CHECK_SYSFAIL("pthread_key_create", status);
+-  status = pthread_mutexattr_init(&mutex_attr);
+-  KMP_CHECK_SYSFAIL("pthread_mutexattr_init", status);
+-  status = pthread_mutex_init(&__kmp_wait_mx.m_mutex, &mutex_attr);
++  status = pthread_mutex_init(&__kmp_wait_mx.m_mutex, nullptr);
+   KMP_CHECK_SYSFAIL("pthread_mutex_init", status);
+-  status = pthread_mutexattr_destroy(&mutex_attr);
+-  KMP_CHECK_SYSFAIL("pthread_mutexattr_destroy", status);
+-  status = pthread_condattr_init(&cond_attr);
+-  KMP_CHECK_SYSFAIL("pthread_condattr_init", status);
+-  status = pthread_cond_init(&__kmp_wait_cv.c_cond, &cond_attr);
++  status = pthread_cond_init(&__kmp_wait_cv.c_cond, nullptr);
+   KMP_CHECK_SYSFAIL("pthread_cond_init", status);
+-  status = pthread_condattr_destroy(&cond_attr);
+-  KMP_CHECK_SYSFAIL("pthread_condattr_destroy", status);
+ #if USE_ITT_BUILD
+   __kmp_itt_initialize();
+ #endif /* USE_ITT_BUILD */
+@@ -2236,7 +2227,7 @@ int __kmp_is_address_mapped(void *addr) {
+   }
+ #elif KMP_OS_WASI
+   found = (int)addr < (__builtin_wasm_memory_size(0) * PAGESIZE);
+-#elif KMP_OS_DRAGONFLY || KMP_OS_SOLARIS || KMP_OS_AIX
++#elif KMP_OS_DRAGONFLY || KMP_OS_SOLARIS || KMP_OS_AIX || KMP_OS_MIOSIX
+ 
+   (void)rc;
+   // FIXME(DragonFly, Solaris, AIX): Implement this
+diff --git a/openmp/runtime/src/z_Windows_NT_util.cpp b/openmp/runtime/src/z_Windows_NT_util.cpp
+index d75b48b2c1bc..2b8490ca2a2d 100644
+--- a/openmp/runtime/src/z_Windows_NT_util.cpp
++++ b/openmp/runtime/src/z_Windows_NT_util.cpp
+@@ -311,9 +311,6 @@ void __kmp_disable(int *old_state) {
+     EnterCriticalSection(&__kmp_win32_section);
+ }
+ 
+-void __kmp_suspend_initialize(void) { /* do nothing */
+-}
+-
+ void __kmp_suspend_initialize_thread(kmp_info_t *th) {
+   int old_value = KMP_ATOMIC_LD_RLX(&th->th.th_suspend_init);
+   int new_value = TRUE;

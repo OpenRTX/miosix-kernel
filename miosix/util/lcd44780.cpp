@@ -11,7 +11,7 @@ namespace {
 /// enables increment mode.
 constexpr unsigned char cmdClear=0x01;
 /// Sets cursor address to 0 and resets scrolling
-constexpr unsigned char cmdHome=0x02;
+// constexpr unsigned char cmdHome=0x02;
 /// Configures display update behaviour at every data byte sent.
 /// \param dir   0: decrement data RAM address at every byte sent
 ///              1: increment data RAM address at every byte sent 
@@ -32,10 +32,10 @@ constexpr unsigned char cmdEnable(unsigned char disp, unsigned char cur)
 /// Move the cursor or scroll the display by 1 character forwards or backwards
 /// \param shift 0: moves the cursor, 1: scrolls the display
 /// \param rl    0: left (increment), 1: right (decrement)
-constexpr unsigned char cmdShift(unsigned char shift, unsigned char dir)
-{
-    return 0x10 | (shift<<3) | (dir<<2);
-}
+// constexpr unsigned char cmdShift(unsigned char shift, unsigned char dir)
+// {
+//     return 0x10 | (shift<<3) | (dir<<2);
+// }
 /// Configures the controller for the display
 /// \param dl    Data length
 ///              0: 4 bit, 1: 8 bit

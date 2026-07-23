@@ -27,7 +27,7 @@
 
 #pragma once
 
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 
 #ifdef SCHED_TYPE_PRIORITY
 
@@ -37,9 +37,9 @@ class Thread; //Forward declaration
 
 /**
  * This class models the concept of priority for the priority scheduler.
- * In this scheduler the priority is simply a short int with values ranging
- * from 0 to PRIORITY_MAX-1, higher values mean higher priority, and the special
- * value -1 reserved for the idle thread.
+ * In this scheduler the priority is simply a signed char with values ranging
+ * from 0 to NUM_PRIORITIES-1, higher values mean higher priority, and the
+ * special value -1 reserved for the idle thread.
  */
 class PrioritySchedulerPriority
 {
@@ -48,17 +48,17 @@ public:
      * Constructor. Not explicit for backward compatibility.
      * \param priority the desired priority value.
      */
-    PrioritySchedulerPriority(short int priority) : priority(priority) {}
+    PrioritySchedulerPriority(signed char priority) : priority(priority) {}
 
     /**
      * Default constructor.
      */
-    PrioritySchedulerPriority() : priority(MAIN_PRIORITY) {}
+    PrioritySchedulerPriority() : priority(DEFAULT_PRIORITY) {}
 
     /**
      * \return the priority value
      */
-    short int get() const { return priority; }
+    signed char get() const { return priority; }
 
     /**
      * \return true if this objects represents a valid priority.
@@ -67,7 +67,7 @@ public:
      */
     bool validate() const
     {
-        return this->priority>=0 && this->priority<PRIORITY_MAX;
+        return this->priority>=0 && this->priority<NUM_PRIORITIES;
     }
     
     /**
@@ -83,7 +83,7 @@ public:
     }
 
 private:
-    short int priority;///< The priority value
+    signed char priority;///< The priority value
 };
 
 inline bool operator<(PrioritySchedulerPriority a, PrioritySchedulerPriority b)
@@ -129,7 +129,6 @@ public:
     ///this.<br>It is also necessary to move the thread from the old prority
     ///list to the new priority list.
     PrioritySchedulerPriority priority;
-    Thread *next;///<Pointer to next thread of the same priority. CIRCULAR list
 };
 
 } //namespace miosix

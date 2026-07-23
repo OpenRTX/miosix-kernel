@@ -26,9 +26,10 @@
  ***************************************************************************/
 
 #include "control_scheduler.h"
+#include "kernel/scheduler/scheduler.h"
 #include "kernel/error.h"
 #include "kernel/process.h"
-#include "interfaces/os_timer.h"
+#include "interfaces_private/cpu.h"
 #include <limits>
 
 using namespace std;
@@ -37,39 +38,12 @@ using namespace std;
 
 namespace miosix {
 
-//These are defined in kernel.cpp
-extern volatile Thread *runningThread;
-extern volatile int kernelRunning;
-extern volatile bool pendingWakeup;
-extern IntrusiveList<SleepData> sleepingList;
+//These are defined in thread.cpp
+extern volatile Thread *runningThreads[CPU_NUM_CORES];
+extern TimeSortedQueue<SleepToken,GetWakeupTime> sleepingList;
 
 //Internal
 static long long burstStart=0;
-static long long nextPreemption=numeric_limits<long long>::max();
-
-// Should be called when the running thread is the idle thread
-static inline void IRQsetNextPreemptionForIdle()
-{
-    if(sleepingList.empty()) nextPreemption=numeric_limits<long long>::max();
-    else nextPreemption=sleepingList.front()->wakeupTime;
-    #ifdef WITH_CPU_TIME_COUNTER
-    burstStart=IRQgetTime();
-    #endif // WITH_CPU_TIME_COUNTER
-    //We could not set an interrupt if the sleeping list is empty but there's
-    //no such hurry to run idle anyway, so why bother?
-    internal::IRQosTimerSetInterrupt(nextPreemption);
-}
-
-// Should be called for threads other than idle thread
-static inline void IRQsetNextPreemption(long long burst)
-{
-    long long firstWakeupInList;
-    if(sleepingList.empty()) firstWakeupInList=numeric_limits<long long>::max();
-    else firstWakeupInList=sleepingList.front()->wakeupTime;
-    burstStart=IRQgetTime();
-    nextPreemption=min(firstWakeupInList,burstStart+burst);
-    internal::IRQosTimerSetInterrupt(nextPreemption);
-}
 
 #ifndef SCHED_CONTROL_MULTIBURST
 
@@ -77,29 +51,25 @@ static inline void IRQsetNextPreemption(long long burst)
 // class ControlScheduler
 //
 
-bool ControlScheduler::PKaddThread(Thread *thread,
+bool ControlScheduler::IRQaddThread(Thread *thread,
         ControlSchedulerPriority priority)
 {
     #ifdef SCHED_CONTROL_FIXED_POINT
     if(threadListSize>=64) return false;
     #endif //SCHED_CONTROL_FIXED_POINT
     thread->schedData.priority=priority;
-    {
-        //Note: can't use FastInterruptDisableLock here since this code is
-        //also called *before* the kernel is started.
-        //Using FastInterruptDisableLock would enable interrupts prematurely
-        //and cause all sorts of misterious crashes
-        InterruptDisableLock dLock;
-        thread->schedData.next=threadList;
-        threadList=thread;
-        threadListSize++;
-        SP_Tr+=bNominal; //One thread more, increase round time
-        IRQrecalculateAlfa();
-    }
+    //Priority and savedPriority must be the same except when locking a mutex
+    //with priority inheritance. A newly created thread isn't yet locking mutex
+    thread->savedPriority=priority;
+    thread->schedData.next=threadList;
+    threadList=thread;
+    threadListSize++;
+    SP_Tr+=bNominal; //One thread more, increase round time
+    IRQrecalculateAlfa();
     return true;
 }
 
-bool ControlScheduler::PKexists(Thread *thread)
+bool ControlScheduler::IRQexists(Thread *thread)
 {
     if(thread==nullptr) return false;
     for(Thread *it=threadList;it!=nullptr;it=it->schedData.next)
@@ -113,14 +83,14 @@ bool ControlScheduler::PKexists(Thread *thread)
     return false;
 }
 
-void ControlScheduler::PKremoveDeadThreads()
+void ControlScheduler::removeDeadThreads()
 {
     //Special case, threads at the head of the list
     while(threadList!=nullptr && threadList->flags.isDeleted())
     {
         Thread *toBeDeleted=threadList;
         {
-            FastInterruptDisableLock dLock;
+            FastGlobalIrqLock dLock;
             threadList=threadList->schedData.next;
             threadListSize--;
             SP_Tr-=bNominal; //One thread less, reduce round time
@@ -137,7 +107,7 @@ void ControlScheduler::PKremoveDeadThreads()
             if(it->schedData.next->flags.isDeleted()==false) continue;
             Thread *toBeDeleted=it->schedData.next;
             {
-                FastInterruptDisableLock dLock;
+                FastGlobalIrqLock dLock;
                 it->schedData.next=it->schedData.next->schedData.next;
                 threadListSize--;
                 SP_Tr-=bNominal; //One thread less, reduce round time
@@ -148,28 +118,26 @@ void ControlScheduler::PKremoveDeadThreads()
         }
     }
     {
-        FastInterruptDisableLock dLock;
+        FastGlobalIrqLock dLock;
         IRQrecalculateAlfa();
     }
 }
 
-void ControlScheduler::PKsetPriority(Thread *thread,
+void ControlScheduler::IRQsetPriority(Thread *thread,
         ControlSchedulerPriority newPriority)
 {
     thread->schedData.priority=newPriority;
-    {
-        FastInterruptDisableLock dLock;
-        IRQrecalculateAlfa();
-    }
+    IRQrecalculateAlfa();
 }
 
-void ControlScheduler::IRQsetIdleThread(Thread *idleThread)
+void ControlScheduler::IRQsetIdleThread(int whichCore, Thread *idleThread)
 {
     idleThread->schedData.priority=-1;
+    idleThread->savedPriority=-1;
     idle=idleThread;
     //Initializing curInRound to end() so that the first time
-    //IRQfindNextThread() is called the scheduling algorithm runs
-    if(threadListSize!=1) errorHandler(UNEXPECTED);
+    //IRQrunScheduler() is called the scheduling algorithm runs
+    if(threadListSize!=1) errorHandler(Error::UNEXPECTED);
     curInRound=nullptr;
 }
 
@@ -178,28 +146,27 @@ Thread *ControlScheduler::IRQgetIdleThread()
     return idle;
 }
 
-long long ControlScheduler::IRQgetNextPreemption()
+void ControlScheduler::IRQrunScheduler()
 {
-    return nextPreemption;
-}
-
-void ControlScheduler::IRQfindNextThread()
-{
-    if(kernelRunning!=0) //If kernel is paused, do nothing
+    FastGlobalLockFromIrq lock;
+    IRQstackOverflowCheck();
+    //If kernel is paused, preemption is disabled
+    if(FastPauseKernelLock::holdingCore==0)
     {
-        pendingWakeup=true;
+        FastPauseKernelLock::pendingWakeup=true;
         return;
     }
+
     #ifdef WITH_CPU_TIME_COUNTER
-    Thread *prev=const_cast<Thread*>(runningThread);
+    Thread *prev=const_cast<Thread*>(runningThreads[0]);
     #endif // WITH_CPU_TIME_COUNTER
 
-    if(runningThread!=idle)
+    if(runningThreads[0]!=idle)
     {
         //Not preempting from the idle thread, store actual burst time of
         //the preempted thread
         int Tp=static_cast<int>(IRQgetTime()-burstStart);
-        runningThread->schedData.Tp=Tp;
+        runningThreads[0]->schedData.Tp=Tp;
         Tr+=Tp;
     }
 
@@ -239,15 +206,16 @@ void ControlScheduler::IRQfindNextThread()
                 //threads from threadList, so it can invalidate iterators
                 //to any element except theadList.end()
                 curInRound=nullptr;
-                runningThread=idle;
-                ctxsave=runningThread->ctxsave;
+                runningThreads[0]=idle;
+                ctxsave[0]=runningThreads[0]->ctxsave;
                 #ifdef WITH_PROCESSES
-                miosix_private::MPUConfiguration::IRQdisable();
+                MPUConfiguration::IRQdisable();
                 #endif
-                IRQsetNextPreemptionForIdle();
-                #ifdef WITH_CPU_TIME_COUNTER
-                IRQprofileContextSwitch(prev->timeCounterData,
-                                        idle->timeCounterData,burstStart);
+                #ifndef WITH_CPU_TIME_COUNTER
+                Scheduler::IRQcomputePreemption(0,0);
+                #else //WITH_CPU_TIME_COUNTER
+                auto now=Scheduler::IRQcomputePreemption(0,0);
+                CPUTimeCounter::IRQprofileContextSwitch(prev,idle[0],now,0);
                 #endif //WITH_CPU_TIME_COUNTER
                 return;
             }
@@ -260,24 +228,25 @@ void ControlScheduler::IRQfindNextThread()
         if(curInRound->flags.isReady())
         {
             //Found a READY thread, so run this one
-            runningThread=curInRound;
+            runningThreads[0]=curInRound;
             #ifdef WITH_PROCESSES
-            if(const_cast<Thread*>(runningThread)->flags.isInUserspace()==false)
+            if(const_cast<Thread*>(runningThreads[0])->flags.isInUserspace()==false)
             {
-                ctxsave=runningThread->ctxsave;
-                miosix_private::MPUConfiguration::IRQdisable();
+                ctxsave[0]=runningThreads[0]->ctxsave;
+                MPUConfiguration::IRQdisable();
             } else {
-                ctxsave=runningThread->userCtxsave;
+                ctxsave[0]=runningThreads[0]->userCtxsave;
                 //A kernel thread is never in userspace, so the cast is safe
-                static_cast<Process*>(runningThread->proc)->mpu.IRQenable();
+                static_cast<Process*>(runningThreads[0]->proc)->mpu.IRQenable();
             }
             #else //WITH_PROCESSES
-            ctxsave=runningThread->ctxsave;
+            ctxsave[0]=runningThreads[0]->ctxsave;
             #endif //WITH_PROCESSES
-            IRQsetNextPreemption(curInRound->schedData.bo/multFactor);
-            #ifdef WITH_CPU_TIME_COUNTER
-            IRQprofileContextSwitch(prev->timeCounterData,
-                                    curInRound->timeCounterData,burstStart);
+            #ifndef WITH_CPU_TIME_COUNTER
+            Scheduler::IRQcomputePreemption(0,curInRound->schedData.bo/multFactor);
+            #else //WITH_CPU_TIME_COUNTER
+            auto now=Scheduler::IRQcomputePreemption(0,curInRound->schedData.bo/multFactor);
+            CPUTimeCounter::IRQprofileContextSwitch(prev,curInRound,now,0);
             #endif //WITH_CPU_TIME_COUNTER
             return;
         } else {
@@ -299,8 +268,8 @@ void ControlScheduler::IRQwaitStatusHook(Thread* t)
 void ControlScheduler::IRQrecalculateAlfa()
 {
     //Sum of all priorities of all threads
-    //Note that since priority goes from 0 to PRIORITY_MAX-1
-    //but priorities we need go from 1 to PRIORITY_MAX we need to add one
+    //Note that since priority goes from 0 to NUM_PRIORITIES-1
+    //but priorities we need go from 1 to NUM_PRIORITIES we need to add one
     unsigned int sumPriority=0;
     for(Thread *it=threadList;it!=nullptr;it=it->schedData.next)
     {
@@ -445,7 +414,6 @@ int ControlScheduler::Tr=bNominal;
 int ControlScheduler::bco=0;
 int ControlScheduler::eTro=0;
 bool ControlScheduler::reinitRegulator=false;
-}
 
 #else //SCHED_CONTROL_MULTIBURST
 
@@ -483,7 +451,7 @@ static inline void remThreadfromActiveList(ThreadsListItem *atlEntry)
     activeThreads.removeFast(atlEntry);
 }
 
-bool ControlScheduler::PKaddThread(Thread *thread,
+bool ControlScheduler::IRQaddThread(Thread *thread,
         ControlSchedulerPriority priority)
 {
     #ifdef SCHED_CONTROL_FIXED_POINT
@@ -491,32 +459,25 @@ bool ControlScheduler::PKaddThread(Thread *thread,
     #endif //SCHED_CONTROL_FIXED_POINT
     thread->schedData.priority=priority;
     thread->schedData.atlEntry.t = thread;
+    thread->schedData.next=threadList;
+    threadList=thread;
+    threadListSize++;
+    SP_Tr+=bNominal; //One thread more, increase round time
+    // Insert the thread in activeThreads list according to its real-time
+    // priority
+    if(thread->flags.isReady())
     {
-        //Note: can't use FastInterruptDisableLock here since this code is
-        //also called *before* the kernel is started.
-        //Using FastInterruptDisableLock would enable interrupts prematurely
-        //and cause all sorts of misterious crashes
-        InterruptDisableLock dLock;
-        thread->schedData.next=threadList;
-        threadList=thread;
-        threadListSize++;
-        SP_Tr+=bNominal; //One thread more, increase round time
-        // Insert the thread in activeThreads list according to its real-time
-        // priority
-        if(thread->flags.isReady())
-        {
-            addThreadToActiveList(&thread->schedData.atlEntry);
-            thread->schedData.lastReadyStatus=true;
-        } else {
-            thread->schedData.lastReadyStatus=false;
-        }
-        
-        IRQrecalculateAlfa();
+        addThreadToActiveList(&thread->schedData.atlEntry);
+        thread->schedData.lastReadyStatus=true;
+    } else {
+        thread->schedData.lastReadyStatus=false;
     }
+    
+    IRQrecalculateAlfa();
     return true;
 }
 
-bool ControlScheduler::PKexists(Thread *thread)
+bool ControlScheduler::IRQexists(Thread *thread)
 {
     if(thread==nullptr) return false;
     for(Thread *it=threadList;it!=nullptr;it=it->schedData.next)
@@ -530,14 +491,14 @@ bool ControlScheduler::PKexists(Thread *thread)
     return false;
 }
 
-void ControlScheduler::PKremoveDeadThreads()
+void ControlScheduler::removeDeadThreads()
 {
     //Special case, threads at the head of the list
     while(threadList!=nullptr && threadList->flags.isDeleted())
     {
         Thread *toBeDeleted=threadList;
         {
-            FastInterruptDisableLock dLock;
+            FastGlobalIrqLock dLock;
             threadList=threadList->schedData.next;
             threadListSize--;
             SP_Tr-=bNominal; //One thread less, reduce round time
@@ -554,7 +515,7 @@ void ControlScheduler::PKremoveDeadThreads()
             if(it->schedData.next->flags.isDeleted()==false) continue;
             Thread *toBeDeleted=it->schedData.next;
             {
-                FastInterruptDisableLock dLock;
+                FastGlobalIrqLock dLock;
                 it->schedData.next=it->schedData.next->schedData.next;
                 threadListSize--;
                 SP_Tr-=bNominal; //One thread less, reduce round time
@@ -565,28 +526,25 @@ void ControlScheduler::PKremoveDeadThreads()
         }
     }
     {
-        FastInterruptDisableLock dLock;
+        FastGlobalIrqLock dLock;
         IRQrecalculateAlfa();
     }
 }
 
-void ControlScheduler::PKsetPriority(Thread *thread,
+void ControlScheduler::IRQsetPriority(Thread *thread,
         ControlSchedulerPriority newPriority)
 {
     thread->schedData.priority=newPriority;
-    {
-        FastInterruptDisableLock dLock;
-        IRQrecalculateAlfa();
-    }
+    IRQrecalculateAlfa();
 }
 
-void ControlScheduler::IRQsetIdleThread(Thread *idleThread)
+void ControlScheduler::IRQsetIdleThread(int whichCore, Thread *idleThread)
 {
     idleThread->schedData.priority=-1;
     idle=idleThread;
     //Initializing curInRound to end() so that the first time
-    //IRQfindNextThread() is called the scheduling algorithm runs
-    if(threadListSize!=1) errorHandler(UNEXPECTED);
+    //IRQrunScheduler() is called the scheduling algorithm runs
+    if(threadListSize!=1) errorHandler(Error::UNEXPECTED);
     curInRound=activeThreads.end();
 }
 
@@ -595,24 +553,27 @@ Thread *ControlScheduler::IRQgetIdleThread()
     return idle;
 }
 
-long long ControlScheduler::IRQgetNextPreemption()
+void ControlScheduler::IRQrunScheduler()
 {
-    return nextPreemption;
-}
+    FastGlobalLockFromIrq lock;
+    IRQstackOverflowCheck();
+    //If kernel is paused, preemption is disabled
+    if(FastPauseKernelLock::holdingCore==0)
+    {
+        FastPauseKernelLock::pendingWakeup=true;
+        return;
+    }
 
-void ControlScheduler::IRQfindNextThread()
-{
-    if(kernelRunning!=0) return;//If kernel is paused, do nothing
     #ifdef WITH_CPU_TIME_COUNTER
-    Thread *prev=const_cast<Thread*>(runningThread);
+    Thread *prev=const_cast<Thread*>(runningThreads[0]);
     #endif // WITH_CPU_TIME_COUNTER
 
-    if(runningThread!=idle)
+    if(runningThreads[0]!=idle)
     {
         //Not preempting from the idle thread, store actual burst time of
         //the preempted thread
         int Tp=static_cast<int>(IRQgetTime()-burstStart);
-        runningThread->schedData.Tp=Tp;
+        runningThreads[0]->schedData.Tp=Tp;
         Tr+=Tp;
     }
 
@@ -647,15 +608,16 @@ void ControlScheduler::IRQfindNextThread()
                 //threads from threadList, so it can invalidate iterators
                 //to any element except theadList.end()
                 curInRound=activeThreads.end();
-                runningThread=idle;
-                ctxsave=runningThread->ctxsave;
+                runningThreads[0]=idle;
+                ctxsave[0]=runningThreads[0]->ctxsave;
                 #ifdef WITH_PROCESSES
                 MPUConfiguration::IRQdisable();
                 #endif
-                IRQsetNextPreemptionForIdle();
-                #ifdef WITH_CPU_TIME_COUNTER
-                IRQprofileContextSwitch(prev->timeCounterData,
-                                        idle->timeCounterData,burstStart);
+                #ifndef WITH_CPU_TIME_COUNTER
+                Scheduler::IRQcomputePreemption(0,0);
+                #else //WITH_CPU_TIME_COUNTER
+                auto now=Scheduler::IRQcomputePreemption(0,0);
+                CPUTimeCounter::IRQprofileContextSwitch(prev,idle,now,0);
                 #endif //WITH_CPU_TIME_COUNTER
                 return;
             }
@@ -668,29 +630,30 @@ void ControlScheduler::IRQfindNextThread()
         if((*curInRound)->t->flags.isReady())
         {
             //Found a READY thread, so run this one
-            runningThread=(*curInRound)->t;
+            runningThreads[0]=(*curInRound)->t;
             #ifdef WITH_PROCESSES
-            if(const_cast<Thread*>(runningThread)->flags.isInUserspace()==false)
+            if(const_cast<Thread*>(runningThreads[0])->flags.isInUserspace()==false)
             {
-                ctxsave=runningThread->ctxsave;
+                ctxsave[0]=runningThreads[0]->ctxsave;
                 MPUConfiguration::IRQdisable();
             } else {
-                ctxsave=runningThread->userCtxsave;
+                ctxsave[0]=runningThreads[0]->userCtxsave;
                 //A kernel thread is never in userspace, so the cast is safe
-                static_cast<Process*>(runningThread->proc)->mpu.IRQenable();
+                static_cast<Process*>(runningThreads[0]->proc)->mpu.IRQenable();
             }
             #else //WITH_PROCESSES
-            ctxsave=runningThread->ctxsave;
+            ctxsave=runningThreads[0]->ctxsave;
             #endif //WITH_PROCESSES
-            IRQsetNextPreemption(runningThread->schedData.bo/multFactor);
-            #ifdef WITH_CPU_TIME_COUNTER
-            IRQprofileContextSwitch(prev->timeCounterData,
-                                    (*curInRound)->t->timeCounterData,burstStart);
+            #ifndef WITH_CPU_TIME_COUNTER
+            Scheduler::IRQcomputePreemption(0,runningThreads[0]->schedData.bo/multFactor);
+            #else //WITH_CPU_TIME_COUNTER
+            auto now=Scheduler::IRQcomputePreemption(0,runningThreads[0]->schedData.bo/multFactor);
+            CPUTimeCounter::IRQprofileContextSwitch(prev,(*curInRound)->t,now,0);
             #endif //WITH_CPU_TIME_COUNTER
             return;
         } else {
             //Error: a not ready thread end up in the ready list
-            errorHandler(UNEXPECTED);
+            errorHandler(Error::UNEXPECTED);
         }
     }
 }
@@ -716,8 +679,8 @@ void ControlScheduler::IRQwaitStatusHook(Thread* t)
 void ControlScheduler::IRQrecalculateAlfa()
 {
     //Sum of all priorities of all threads
-    //Note that since priority goes from 0 to PRIORITY_MAX-1
-    //but priorities we need go from 1 to PRIORITY_MAX we need to add one
+    //Note that since priority goes from 0 to NUM_PRIORITIES-1
+    //but priorities we need go from 1 to NUM_PRIORITIES we need to add one
     unsigned int sumPriority=0;
     for(auto it=activeThreads.begin();it!=activeThreads.end();++it)
     {
@@ -749,7 +712,7 @@ void ControlScheduler::IRQrecalculateAlfa()
         it->schedData.alfa=base*((float)(it->schedData.priority.get()+1));
         #endif //ENABLE_FEEDFORWARD
     }
-    #else //FIXED_POINT_MATH
+    #else //SCHED_CONTROL_FIXED_POINT
     //Sum of all alfa is maximum value for an unsigned short
     unsigned int base=4096/sumPriority;
     for(Thread *it=threadList;it!=nullptr;it=it->schedData.next)
@@ -767,7 +730,7 @@ void ControlScheduler::IRQrecalculateAlfa()
         it->schedData.alfa=base*(it->schedData.priority.get()+1);
         #endif //ENABLE_FEEDFORWARD
     }
-    #endif //FIXED_POINT_MATH
+    #endif //SCHED_CONTROL_FIXED_POINT
     reinitRegulator=true;
 }
 
@@ -802,9 +765,9 @@ void ControlScheduler::IRQrunRegulator(bool allReadyThreadsSaturated)
         bco=min<int>(max(bco,-Tr),bMax*threadListSize);
         #ifndef SCHED_CONTROL_FIXED_POINT
         float nextRoundTime=static_cast<float>(Tr+bco);
-        #else //FIXED_POINT_MATH
+        #else //SCHED_CONTROL_FIXED_POINT
         unsigned int nextRoundTime=Tr+bco; //Bounded to 20bits
-        #endif //FIXED_POINT_MATH
+        #endif //SCHED_CONTROL_FIXED_POINT
         eTro=eTr;
         Tr=0;//Reset round time
         for(Thread *it=threadList;it!=nullptr;it=it->schedData.next)
@@ -813,11 +776,11 @@ void ControlScheduler::IRQrunRegulator(bool allReadyThreadsSaturated)
             #ifndef SCHED_CONTROL_FIXED_POINT
             it->schedData.SP_Tp=static_cast<int>(
                     it->schedData.alfa*nextRoundTime);
-            #else //FIXED_POINT_MATH
+            #else //SCHED_CONTROL_FIXED_POINT
             //nextRoundTime is bounded to 20bits, alfa to 12bits,
             //so the multiplication fits in 32bits
             it->schedData.SP_Tp=(it->schedData.alfa*nextRoundTime)/4096;
-            #endif //FIXED_POINT_MATH
+            #endif //SCHED_CONTROL_FIXED_POINT
 
             //Run each thread internal regulator
             int eTp=it->schedData.SP_Tp - it->schedData.Tp;
@@ -862,7 +825,13 @@ int ControlScheduler::bco=0;
 int ControlScheduler::eTro=0;
 bool ControlScheduler::reinitRegulator=false;
 
+#endif //SCHED_CONTROL_MULTIBURST
+
+#ifdef OS_TIMER_MODEL_UNIFIED
+template<typename T>
+long long basic_scheduler<T>::nextPreemptionWakeupCore=numeric_limits<long long>::max();
+#endif //OS_TIMER_MODEL_UNIFIED
+
 } //namespace miosix
 
-#endif //SCHED_CONTROL_MULTIBURST
 #endif //SCHED_TYPE_CONTROL_BASED

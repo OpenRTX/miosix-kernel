@@ -1,0 +1,72 @@
+diff --color -ruN Include.orig/stm32h503xx.h Include/stm32h503xx.h
+--- Include.orig/stm32h503xx.h	2024-10-30 18:07:41.000000000 +0100
++++ Include/stm32h503xx.h	2025-02-01 22:19:43.112609641 +0100
+@@ -186,7 +186,7 @@
+ /** @} */ /* End of group Configuration_of_CMSIS */
+ 
+ 
+-#include "core_cm33.h"                       /*!< ARM Cortex-M33 processor and core peripherals */
++#include <CMSIS/Include/core_cm33.h>         /*!< ARM Cortex-M33 processor and core peripherals */
+ #include "system_stm32h5xx.h"                /*!< STM32H5xx System */
+ 
+ 
+diff --color -ruN Include.orig/stm32h523xx.h Include/stm32h523xx.h
+--- Include.orig/stm32h523xx.h	2024-10-30 18:07:41.000000000 +0100
++++ Include/stm32h523xx.h	2025-02-01 22:20:17.220511668 +0100
+@@ -215,7 +215,7 @@
+ /** @} */ /* End of group Configuration_of_CMSIS */
+ 
+ 
+-#include "core_cm33.h"                       /*!< ARM Cortex-M33 processor and core peripherals */
++#include <CMSIS/Include/core_cm33.h>         /*!< ARM Cortex-M33 processor and core peripherals */
+ #include "system_stm32h5xx.h"                /*!< STM32H5xx System */
+ 
+ 
+diff --color -ruN Include.orig/stm32h533xx.h Include/stm32h533xx.h
+--- Include.orig/stm32h533xx.h	2024-10-30 18:07:41.000000000 +0100
++++ Include/stm32h533xx.h	2025-02-01 22:20:25.680487595 +0100
+@@ -218,7 +218,7 @@
+ /** @} */ /* End of group Configuration_of_CMSIS */
+ 
+ 
+-#include "core_cm33.h"                       /*!< ARM Cortex-M33 processor and core peripherals */
++#include <CMSIS/Include/core_cm33.h>         /*!< ARM Cortex-M33 processor and core peripherals */
+ #include "system_stm32h5xx.h"                /*!< STM32H5xx System */
+ 
+ 
+diff --color -ruN Include.orig/stm32h562xx.h Include/stm32h562xx.h
+--- Include.orig/stm32h562xx.h	2024-10-30 18:07:41.000000000 +0100
++++ Include/stm32h562xx.h	2025-02-01 22:20:34.364462963 +0100
+@@ -234,7 +234,7 @@
+ /** @} */ /* End of group Configuration_of_CMSIS */
+ 
+ 
+-#include "core_cm33.h"                       /*!< ARM Cortex-M33 processor and core peripherals */
++#include <CMSIS/Include/core_cm33.h>         /*!< ARM Cortex-M33 processor and core peripherals */
+ #include "system_stm32h5xx.h"                /*!< STM32H5xx System */
+ 
+ 
+diff --color -ruN Include.orig/stm32h563xx.h Include/stm32h563xx.h
+--- Include.orig/stm32h563xx.h	2024-10-30 18:07:41.000000000 +0100
++++ Include/stm32h563xx.h	2025-02-01 22:20:46.028430022 +0100
+@@ -239,7 +239,7 @@
+ /** @} */ /* End of group Configuration_of_CMSIS */
+ 
+ 
+-#include "core_cm33.h"                       /*!< ARM Cortex-M33 processor and core peripherals */
++#include <CMSIS/Include/core_cm33.h>         /*!< ARM Cortex-M33 processor and core peripherals */
+ #include "system_stm32h5xx.h"                /*!< STM32H5xx System */
+ 
+ 
+diff --color -ruN Include.orig/stm32h573xx.h Include/stm32h573xx.h
+--- Include.orig/stm32h573xx.h	2024-10-30 18:07:41.000000000 +0100
++++ Include/stm32h573xx.h	2025-02-01 22:20:55.980402038 +0100
+@@ -242,7 +242,7 @@
+ /** @} */ /* End of group Configuration_of_CMSIS */
+ 
+ 
+-#include "core_cm33.h"                       /*!< ARM Cortex-M33 processor and core peripherals */
++#include <CMSIS/Include/core_cm33.h>         /*!< ARM Cortex-M33 processor and core peripherals */
+ #include "system_stm32h5xx.h"                /*!< STM32H5xx System */
+ 
+ 

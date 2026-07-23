@@ -27,10 +27,10 @@
 
 #pragma once
 
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 #include "control_scheduler_types.h"
 #include "parameters.h"
-#include "kernel/kernel.h"
+#include "kernel/thread.h"
 #include <algorithm>
 
 #ifdef SCHED_TYPE_CONTROL_BASED
@@ -55,7 +55,7 @@ public:
      * Priority must be a positive value.
      * Note that the meaning of priority is scheduler specific.
      */
-    static bool PKaddThread(Thread *thread, ControlSchedulerPriority priority);
+    static bool IRQaddThread(Thread *thread, ControlSchedulerPriority priority);
 
     /**
      * \internal
@@ -66,14 +66,14 @@ public:
      *
      * Can be called both with the kernel paused and with interrupts disabled.
      */
-    static bool PKexists(Thread *thread);
+    static bool IRQexists(Thread *thread);
 
     /**
      * \internal
      * Called when there is at least one dead thread to be removed from the
      * scheduler
      */
-    static void PKremoveDeadThreads();
+    static void removeDeadThreads();
 
     /**
      * \internal
@@ -83,7 +83,7 @@ public:
      * \param newPriority new thread priority.
      * Priority must be a positive value.
      */
-    static void PKsetPriority(Thread *thread,
+    static void IRQsetPriority(Thread *thread,
             ControlSchedulerPriority newPriority);
 
     /**
@@ -105,7 +105,7 @@ public:
      * thread is the idle thread, to be run all the times where no other thread
      * can run.
      */
-    static void IRQsetIdleThread(Thread *idleThread);
+    static void IRQsetIdleThread(int whichCore, Thread *idleThread);
 
     /**
      * \internal
@@ -123,25 +123,19 @@ public:
 
     /**
      * \internal
-     * This function is used to develop interrupt driven peripheral drivers.<br>
-     * Can be used ONLY inside an IRQ (and not when interrupts are disabled) to
-     * find next thread in READY status. If the kernel is paused, does nothing.
-     * Can be used for example if an IRQ causes a higher priority thread to be
-     * woken, to change context. Note that to use this function the IRQ must
-     * use the macros to save/restore context defined in portability.h
-     *
-     * If the kernel is paused does nothing.
-     * It's behaviour is to modify the global variable miosix::cur which always
-     * points to the currently running thread.
+     * Called when a thread transitions from waiting/sleeping to ready.
+     * Must not be called if the thread is already ready.
      */
-    static void IRQfindNextThread();
-    
+    static void IRQwokenThread(Thread* thread) { }
+
     /**
      * \internal
-     * \return the next scheduled preemption set by the scheduler
-     * In case no preemption is set returns numeric_limits<long long>::max()
+     * This function is used only by the kernel code to run the scheduler.
+     * It finds the next thread in READY status. If the kernel is paused,
+     * does nothing. It's behaviour is to modify the global variable
+     * miosix::runningThread which always points to the currently running thread.
      */
-    static long long IRQgetNextPreemption();
+    static void IRQrunScheduler();
 
 private:
     /**
@@ -152,7 +146,7 @@ private:
     static void IRQrecalculateAlfa();
 
     /**
-     * Called by IRQfindNextThread(), this function is where the control based
+     * Called by IRQrunScheduler(), this function is where the control based
      * scheduling algorithm is run. It is called once per round.
      */
     static void IRQrunRegulator(bool allReadyThreadsSaturated);

@@ -1,0 +1,1232 @@
+/***************************************************************************
+ *   Copyright (C) 2008-2025 by Terraneo Federico                          *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   As a special exception, if other files instantiate templates or use   *
+ *   macros or inline functions from this file, or you compile this file   *
+ *   and link it with other works to produce a work based on this file,    *
+ *   this file does not by itself cause the resulting work to be covered   *
+ *   by the GNU General Public License. However the source code for this   *
+ *   file must still be made available in accordance with the GNU General  *
+ *   Public License. This exception does not invalidate any other reasons  *
+ *   why a work based on this file might be covered by the GNU General     *
+ *   Public License.                                                       *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
+ ***************************************************************************/ 
+
+#include "thread.h"
+#include "error.h"
+#include "logging.h"
+#include "sync.h"
+#include "boot.h"
+#include "process.h"
+#include "stackcheck.h"
+#include "scheduler/scheduler.h"
+#include "sched_data_structures.h"
+#include "kercalls/libc_integration.h"
+#include "interfaces_private/cpu.h"
+#include "interfaces_private/userspace.h"
+#include "interfaces_private/os_timer.h"
+#include "interfaces_private/sleep.h"
+#include "interfaces_private/smp.h"
+#include "timeconversion.h"
+#include "pthread_private.h"
+#include <stdexcept>
+#include <algorithm>
+#include <limits>
+#include <string.h>
+#include <reent.h>
+
+using namespace std;
+
+/*
+ * This global variable is used to point to the context of the currently running
+ * thread. It is kept even though global variables are generally bad due to
+ * performance reasons. It is used by
+ * - saveContext() / restoreContext(), to perform context switches
+ * - the schedulers, to set the newly running thread before a context switch
+ * - IRQportableStartKernel(), to perform the first context switch
+ * It is defined in the header interfaces_private/cpu.h
+ */
+extern "C" {
+volatile unsigned int *ctxsave[miosix::CPU_NUM_CORES];
+}
+
+
+namespace miosix {
+
+//Global variables used by thread.cpp. Those that are not static are also used
+//in lock.cpp and by the schedulers.
+//These variables MUST NOT be used outside of those files
+
+///\internal Threads currently running on all CPU cores
+volatile Thread *runningThreads[CPU_NUM_CORES]={nullptr};
+
+///\internal True if there are threads in the DELETED status. Used by idle thread
+static volatile int existDeleted=0;
+
+TimeSortedQueue<SleepToken,GetWakeupTime> sleepingList;///list of sleeping threads
+
+#ifdef WITH_PROCESSES
+/// The proc field of the Thread class for kernel threads points to this object
+static ProcessBase *kernelProcess=nullptr;
+#endif //WITH_PROCESSES
+
+#ifdef WITH_DEEP_SLEEP
+extern int deepSleepCounter; ///< Shared with lock.cpp
+#endif //WITH_DEEP_SLEEP
+
+/**
+ * \internal
+ * Idle thread. Created when the kernel is started, it physically deallocates
+ * memory for deleted threads, and puts the cpu in sleep mode.
+ *
+ * \warning Code called from the idle thread must not use C library functions
+ * that require locking since the idle thread shares the same C reentrancy
+ * structure with main.
+ */
+void *idleThreadCore0(void *)
+{
+    for(;;)
+    {
+        if(atomicSwap(&existDeleted,0)) Scheduler::removeDeadThreads();
+        #ifdef WITH_SLEEP
+        #ifdef WITH_DEEP_SLEEP
+        #ifdef WITH_SMP
+        #error Deep sleep not yet supported in SMP kernel
+        // TODO: deep sleep turns off clock to all peripherals and cpus, so it
+        // can be entered only when all cpus are idle.
+        // To implement this the following are needed:
+        //  - The scheduler needs to expose a global counting how many cores
+        //    are idle
+        //  - The deep sleep check/enter logic here needs to run on all cores
+        //    (not just core 0)
+        //  - Deep sleep is entered when deepSleepCounter==0 and the cpu idle
+        //    global reaches the core count
+        #endif
+        {
+            FastGlobalIrqLock lock;
+            bool sleep;
+            if(deepSleepCounter==0)
+            {
+                if(sleepingList.empty()==false)
+                {
+                    long long wakeup=sleepingList.front()->wakeupTime;
+                    sleep=!IRQdeepSleep(wakeup);
+                } else sleep=!IRQdeepSleep();
+            } else sleep=true;
+            //NOTE: going to sleep with interrupts disabled makes sure no
+            //preemption occurs from when we take the decision to sleep till
+            //we actually do sleep. Wakeup interrupt will be run when we enable
+            //back interrupts
+            if(sleep) sleepCpu();
+        }
+        #else //WITH_DEEP_SLEEP
+        sleepCpu();
+        #endif //WITH_DEEP_SLEEP
+        #endif //WITH_SLEEP
+    }
+}
+
+#ifdef WITH_SMP
+/**
+ * \internal
+ * Idle thread for cores other than the core 0, does even less
+ *
+ * \warning Code called from the idle thread must not use C library functions
+ * that require locking since the idle thread shares the same C reentrancy
+ * structure with main. This is not a problem as this idle thread at most
+ * calls the assembly instruction to sleep the CPU
+ */
+void *idleThreadOtherCores(void *)
+{
+    for(;;)
+    {
+        #ifdef WITH_SLEEP
+        sleepCpu();
+        #endif //WITH_SLEEP
+    }
+}
+#endif
+
+/**
+ * \internal
+ * Start the kernel.<br> There is no way to stop the kernel once it is
+ * started, except a (software or hardware) system reset.<br>
+ * Calls errorHandler(Error::OUT_OF_MEMORY) if there is no heap to create the
+ * idle thread. If the function succeds in starting the kernel, it never returns;
+ * otherwise it will call errorHandler(Error::OUT_OF_MEMORY) and then return
+ * immediately. IRQstartKernel() must not be called when the kernel is already
+ * started.
+ */
+void IRQstartKernel()
+{
+    if(areInterruptsEnabled()) errorHandler(Error::INTERRUPTS_ENABLED_AT_BOOT);
+    #ifdef WITH_SMP
+    if(GlobalIrqLock::holdingCore!=0)
+        errorHandler(Error::INTERRUPTS_ENABLED_AT_BOOT);
+    #endif
+    if(FastPauseKernelLock::holdingCore!=0)
+        errorHandler(Error::KERNEL_ALREADY_STARTED_AT_BOOT);
+        
+    #ifdef WITH_PROCESSES
+    try {
+        kernelProcess=new ProcessBase;
+    } catch(...) {
+        errorHandler(Error::OUT_OF_MEMORY);
+    }
+    #endif //WITH_PROCESSES
+    
+    // As a side effect this function allocates the first idle thread and makes
+    // runningThreads[0] point to it. It's probably been called at least once
+    // during boot by the time we get here, but we can't be sure
+    auto *idle=Thread::IRQgetCurrentThread();
+    
+    #ifdef WITH_PROCESSES
+    // If the idle thread was allocated before IRQstartKernel(), then its proc
+    // is nullptr. We can't move kernelProcess=new ProcessBase; earlier than this
+    // function, though
+    idle->proc=kernelProcess;
+    #endif //WITH_PROCESSES
+
+    // Create the main thread and add it to the scheduler.
+    Thread *main;
+    main=Thread::doCreate(mainLoader,MAIN_STACK_SIZE,nullptr,Thread::DEFAULT,true);
+    if(main==nullptr) errorHandler(Error::OUT_OF_MEMORY);
+    if(Scheduler::IRQaddThread(main,DEFAULT_PRIORITY)==false) errorHandler(Error::UNEXPECTED);
+
+    // Idle thread needs to be set after main (see control_scheduler.cpp)
+    Scheduler::IRQsetIdleThread(0,idle);
+
+    // On SMP platforms, create and set idle threads for all other cores, and
+    // prepare the array of core main functions.
+    #ifdef WITH_SMP
+    void *coreBootStacks[CPU_NUM_CORES-1];
+    void (*coreBootEntryPoints[CPU_NUM_CORES-1])();
+    for(int i=1;i<CPU_NUM_CORES;i++)
+    {
+        // Create idle thread and set it as running
+        idle=Thread::doCreate(idleThreadOtherCores,STACK_IDLE,nullptr,Thread::DEFAULT,true);
+        if(idle==nullptr) errorHandler(Error::OUT_OF_MEMORY);
+        Scheduler::IRQsetIdleThread(i,idle);
+        runningThreads[i]=idle;
+        // Prepare initial stack and entry point. The core entry point does
+        // nothing but an initial context switch, so we re-use the idle thread
+        // stack to avoid allocating a temporary stack. The -CTXSAVE_ON_STACK is
+        // important to prevent the core setup code from corrupting the idle
+        // thread context prepared on the stack by Thread::doCreate.
+        coreBootStacks[i-1]=reinterpret_cast<unsigned char*>(idle)-CTXSAVE_ON_STACK;
+        coreBootEntryPoints[i-1]=&IRQportableStartKernel;
+    }
+    #endif //WITH_SMP
+    
+    // Make the C standard library use per-thread reeentrancy structure
+    setCReentrancyCallback(Thread::getCReent);
+    
+    // Initialize the global locks
+    #ifdef WITH_SMP
+    GlobalIrqLock::holdingCore=0xff;
+    #endif
+    FastPauseKernelLock::holdingCore=0xff;
+    // Boot the other cores, and then this core.
+    #ifdef WITH_SMP
+    IRQinitSMP(coreBootStacks,coreBootEntryPoints);
+    #endif //WITH_SMP
+    IRQportableStartKernel();
+}
+
+//These are not implemented here, but in the platform/board-specific os_timer.
+//long long getTime() noexcept
+//long long IRQgetTime() noexcept
+
+/**
+ * \internal
+ * This is the OS timer interrupt for WAKEUP_HANDLING_CORE, the only core that
+ * is assigned the task to handle the wakeup of sleeping threads. The OS timer
+ * is set aperiodically by the scheduler to both wake sleeping threads and to
+ * handle preemption on that core.
+ * \warning currentTime cannot be earlier than the last timer interrupt actually
+ * programmed by the scheduler!
+ */
+void IRQwakeThreads(long long currentTime)
+{
+    if(extraChecks==ExtraChecks::Kernel)
+        if(getCurrentCoreId()!=WAKEUP_HANDLING_CORE) errorHandler(Error::UNEXPECTED);
+
+    // Condition (for the unified timer model)
+    // A woken higher priority thread than running on another core
+    // B woken higher priority thread than running on WAKEUP_HANDLING_CORE
+    // C time to preempt task on WAKEUP_HANDLING_CORE
+    // Truth table
+    // A B C
+    // 0 0 0 osTimerSetInterrupt(min(firstWakeup,nextPreempt))
+    // 0 0 1 invokeScheduler
+    // 0 1 0 invokeScheduler
+    // 0 1 1 invokeScheduler
+    // 1 0 0 invokeSchedulerOnCore + osTimerSetInterrupt(min(firstWakeup,nextPreempt))
+    // 1 0 1 invokeSchedulerOnCore + invokeScheduler
+    // 1 1 0 invokeSchedulerOnCore + invokeScheduler
+    // 1 1 1 invokeSchedulerOnCore + invokeScheduler
+    bool hptw=false;
+    while(SleepToken *st=sleepingList.dequeueTime(currentTime))
+    {
+        // Wake both threads doing absoluteSleep() and timedWait()
+        Thread *t=st->thread;
+        t->flags.IRQclearSleepAndWait(t);
+        // Heuristic load balancing: threads waking from sleep get preferentially
+        // allocated to higher core numbers
+        if(Thread::IRQconsiderRescheduling<Thread::Hlb::FromLast>(t,WAKEUP_HANDLING_CORE))
+            hptw=true;
+    }
+    if(hptw) IRQinvokeScheduler();
+    #ifdef OS_TIMER_MODEL_UNIFIED
+    // In the unified model, the scheduler on WAKEUP_HANDLING_CORE uses
+    // IRQosTimerSetInterrupt() for both preemption and wakeup, so if we're
+    // calling the scheduler already, no need to set the next wakeup interrupt
+    else {
+        long long nextPreempt=Scheduler::IRQgetWakeupCoreNextPreemption();
+        if(currentTime>=nextPreempt) IRQinvokeScheduler();
+        else {
+            // In the unified timer model we need to set the next interrupt to
+            // the minimum time between the enxt preemption and the next wakeup
+            long long firstWakeup;
+            if(sleepingList.empty()) firstWakeup=numeric_limits<long long>::max();
+            else firstWakeup=sleepingList.front()->wakeupTime;
+            IRQosTimerSetInterrupt(min(firstWakeup,nextPreempt));
+        }
+    }
+    #else //OS_TIMER_MODEL_UNIFIED
+    // In the separate timer model, IRQosTimerSetInterrupt() is only used for
+    // thread wakeups
+    if(sleepingList.empty()==false)
+        IRQosTimerSetInterrupt(sleepingList.front()->wakeupTime);
+    #endif //OS_TIMER_MODEL_UNIFIED
+}
+
+/**
+ * Update the OS timer after a thread is added to the sleeping list.
+ * Must not be called when the sleepingList is empty.
+ */
+static inline void IRQupdateOsTimer()
+{
+    // Updating the OS timer is only required
+    // - In the separate timer model, as in this case the scheduler never calls
+    //   IRQosTimerSetInterrupt(), both on single core and SMP configurations
+    // - In the unified timer model with SMP, as in this case the scheduler
+    //   updates the OS timer only when running on WAKEUP_HANDLING_CORE, thus a
+    //   thread running on another core and initiating a sleep won't cause the
+    //   OS timer to be updated
+    #if !defined(OS_TIMER_MODEL_UNIFIED) || defined(WITH_SMP)
+    if(extraChecks==ExtraChecks::Kernel && sleepingList.empty())
+        errorHandler(Error::UNEXPECTED);
+    long long firstWakeup=sleepingList.front()->wakeupTime;
+    if(firstWakeup<IRQosTimerGetInterrupt()) IRQosTimerSetInterrupt(firstWakeup);
+    #endif //OS_TIMER_MODEL_UNIFIED
+}
+
+/*
+Memory layout for a thread
+    |------------------------|
+    |     class Thread       |
+    |------------------------|<-- this
+    |         stack          |
+    |           |            |
+    |           V            |
+    |------------------------|
+    |       watermark        |
+    |------------------------|<-- base, watermark
+*/
+
+Thread *Thread::create(void *(*startfunc)(void *), unsigned int stacksize,
+                       Priority priority, void *argv, Options options)
+{
+    //Check to see if input parameters are valid
+    if(priority.validate()==false || stacksize<STACK_MIN) return nullptr;
+    
+    Thread *thread=doCreate(startfunc,stacksize,argv,options,false);
+    if(thread==nullptr) return nullptr;
+    
+    //Add thread to scheduler
+    FastGlobalIrqLock dLock;
+    if(Scheduler::IRQaddThread(thread,priority)==false)
+    {
+        FastGlobalIrqUnlock eLock(dLock);
+        //Reached limit on number of threads
+        unsigned int *base=thread->watermark;
+        thread->~Thread();
+        free(base); //Delete ALL thread memory
+        return nullptr;
+    }
+    // Heuristic load balancing: threads just created get preferentially
+    // allocated to higher core numbers
+    if(IRQconsiderRescheduling<Hlb::FromLast>(thread,getCurrentCoreId()))
+        IRQinvokeScheduler();
+    return thread;
+}
+
+void Thread::yield()
+{
+    // NOTE: IRQinvokeScheduler is currently safe to be called also without the
+    // global lock. If this property changes, we'll need to take the lock
+    IRQinvokeScheduler();
+}
+
+void Thread::sleep(unsigned int ms)
+{
+    nanoSleepUntil(getTime()+mul32x32to64(ms,1000000));
+}
+
+void Thread::nanoSleep(long long ns)
+{
+    nanoSleepUntil(getTime()+ns);
+}
+
+void Thread::nanoSleepUntil(long long absoluteTimeNs)
+{
+    //Disallow absolute sleeps with negative or too low values, as the ns2tick()
+    //algorithm in TimeConversion can't handle negative values and may undeflow
+    //even with very low values due to a negative adjustOffsetNs. As an unlikely
+    //side effect, very short sleeps done very early at boot will be extended.
+    absoluteTimeNs=max(absoluteTimeNs,100000LL);
+    //pauseKernel() here is not enough since even if the kernel is stopped
+    //the timer isr will wake threads, modifying the sleepingList
+    {
+        FastGlobalIrqLock dLock;
+        Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+        SleepToken st(cur,absoluteTimeNs);
+        cur->flags.IRQsetSleep(cur); //Sleeping thread: set sleep flag
+        sleepingList.enqueue(&st);
+        IRQupdateOsTimer();
+        IRQinvokeScheduler();
+        {
+            FastGlobalIrqUnlock eLock(dLock);
+            //Interrupts are enabled, context switch happens, return after wakeup
+        }
+        //Only required for interruptibility when terminate is called
+        sleepingList.remove(&st);
+    }
+}
+
+void Thread::wait()
+{
+    //pausing the kernel is not enough because of IRQwait and IRQwakeup
+    {
+        FastGlobalIrqLock lock;
+        Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+        cur->flags.IRQsetWait(cur);
+        IRQinvokeScheduler();
+    }
+    //Interrupts are enabled, context switch happens, return after wakeup
+}
+
+TimedWaitResult Thread::timedWait(long long absoluteTimeNs)
+{
+    FastGlobalIrqLock dLock;
+    return IRQglobalIrqUnlockAndTimedWaitImpl(absoluteTimeNs);
+}
+
+void Thread::wakeup()
+{
+    //pausing the kernel is not enough because of IRQwait and IRQwakeup
+    FastGlobalIrqLock lock;
+    IRQwakeup();
+}
+
+void Thread::PKwakeup()
+{
+    //pausing the kernel is not enough because of IRQwait and IRQwakeup
+    //DO NOT refactor this code by calling IRQwakeup() as IRQwakeup can cause
+    //the scheduler interrupt to be called on the current core
+    FastGlobalIrqLock lock;
+    this->flags.IRQclearWait(this);
+    // Heuristic load balancing: threads waking from mutexes get preferentially
+    // allocated to lower core numbers
+    if(IRQconsiderRescheduling<Hlb::FromFirst>(this,getCurrentCoreId()))
+    {
+        //Thread is higher priority than the one running on this core, but we
+        //can't invoke the scheduler since we are in PK context and preemption
+        //is disabled, so set pendingWakeup
+        FastPauseKernelLock::pendingWakeup=true;
+    }
+}
+
+void Thread::IRQwakeup()
+{
+    this->flags.IRQclearWait(this);
+    // Heuristic load balancing: threads waking from I/O get preferentially
+    // allocated to lower core numbers
+    if(IRQconsiderRescheduling<Hlb::FromFirst>(this,getCurrentCoreId()))
+        IRQinvokeScheduler();
+}
+
+Thread *Thread::getCurrentThread()
+{
+    //Need to add lock if SMP, see comment in Thread::IRQgetCurrentThread()
+    #ifdef WITH_SMP
+    fastDisableIrq();
+    #endif //WITH_SMP
+    Thread *result=IRQgetCurrentThread();
+    #ifdef WITH_SMP
+    fastEnableIrq();
+    #endif //WITH_SMP
+    return result;
+}
+
+Thread *Thread::IRQgetCurrentThread()
+{
+    // NOTE: this function used to be safe to be called also with interrupts
+    // enabled and older versions of Miosix took advantage of this property to
+    // have getCurrentThread() and PKgetCurrentThread() call this function
+    // directly without adding locks for perfromance reasons.
+    // On multi-core architectures, calling this function without taking any
+    // lock is no longer safe, as a context switch can happen between the
+    // getCurrentCoreId() and array indexing. If the thread migrates to a
+    // different core during the context switch, this function then returns the
+    // wrong thread pointer. This caused intermittent failures in the testsuite
+    // test_26.
+    // There is actually no need to take the global lock though, disabling
+    // interrupts on the local core and/or taking the pause kernel lock is
+    // enough to prevent the currently running thread from being preempted and
+    // migrated. Thus, in the current implementation
+    // - PKgetCurrentThread() calls IRQgetCurrentThread() without futher locks
+    // - getCurrentThread() on multi-core architectures disables interrupts on
+    // the core it is called from, on single-core architectures takes no lock
+
+    Thread *result=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+    if(result) return result;
+    //This function must always return a pointer to a valid thread. The first
+    //time this is called before the kernel is started, however, runningThreads
+    //is nullptr, thus we allocate the idle thread and return a pointer to that.
+    return IRQallocateIdleThread();
+}
+
+bool Thread::IRQexists(Thread* t)
+{
+    if(t==nullptr) return false;
+    return Scheduler::IRQexists(t);
+}
+
+Priority Thread::getPriority()
+{
+    //NOTE: the code in all schedulers is currently safe to be called either
+    //with interrupt enabed or not, and with the kernel paused or not, so
+    //PKgetPriority() and IRQgetPriority() directly call here. If introducing
+    //changes that break this property, these functions may need to be split
+    return Scheduler::getPriority(this);
+}
+
+void Thread::setPriority(Priority pr)
+{
+    if(pr.validate()==false) return;
+
+    PauseKernelLock dLock;
+    Thread *cur=PKgetCurrentThread();
+    //If thread is locking at least one mutex
+    if(cur->mutexLocked!=nullptr)
+    {
+        /*
+         * The following algorithm may look simple but it's not, as setting a
+         * thread priority when it's locking one or more mutexes with priority
+         * inheritance requires to consider 4 variables:
+         * A savedPriority: final priority when unlocking all mutexes
+         * B inheritedPriority: max priority of all threads waiting on all
+         *   mutexes this thread is locking
+         * C actualPriority: the current priority of the thread as seen by the
+         *   scheduler that already takes into account inheritance so far
+         * D newPriority: the priority we want to set through this function
+         *
+         * Here are some test cases to wrap your head around:
+         * A B C D corresponding action we want to do in this function
+         * 3 1 3 0 savedPriority=0; IRQsetPriority(1); yield();
+         * 3 1 3 1 savedPriority=1; IRQsetPriority(1); yield();
+         * 3 1 3 2 savedPriority=2; IRQsetPriority(2); yield();
+         * 3 1 3 3 -
+         * 3 1 3 4 savedPriority=4; IRQsetPriority(4);
+         * 1 2 2 1 -
+         * 1 2 2 2 savedPriority=2;
+         * 1 2 2 3 savedPriority=3; IRQsetPriority(3);
+         * 2 2 2 1 savedPriority=1;
+         * 2 2 2 2 -
+         * 2 2 2 3 savedPriority=3; IRQsetPriority(3);
+         * 2 - 2 1 savedPriority=1; IRQsetPriority(1); yield();
+         * 2 - 2 2 -
+         * 2 - 2 3 savedPriority=3; IRQsetPriority(3);
+         * NOTE: inheritedPriority can not have a defined value if the current
+         * thread is locking mutexes but no threads are waiting on them
+         */
+
+        //savedPriority must always be changed, when all mutexes are eventually
+        //unlocked the final thread priority must be the one we set here
+        if(cur->savedPriority==pr) return;
+        cur->savedPriority=pr;
+
+        //We could perform this computation only if(pr<oldActualPrio) since
+        //we need to care about inheritedPriority only when lowering our
+        //priority but it's a minor optimization and would increase code size...
+        pr=Mutex::inheritPriorityFromLockedList(cur,pr);
+    }
+
+    //If old actual priority == desired priority, nothing more to do.
+    Priority oldActualPrio=cur->PKgetPriority();
+    if(pr==oldActualPrio) return;
+    {
+        //If not locking any mutex priority and savedPriority must be the same
+        if(cur->mutexLocked==nullptr) cur->savedPriority=pr;
+        FastGlobalIrqLock irqLock;
+        Scheduler::IRQsetPriority(cur,pr);
+        //We're also in a PauseKernelLock, don't waste time calling the
+        //scheduler just for it to set pendingWakeup and bounce back, set it
+        //here. With the current implementation of the priority scheduler
+        //there's a possible spurious yield here, since we'll be put to the back
+        //of the scheduling queue even if there's no higher priority thread than
+        //our new (lowered) priority, but there's no way of knowing unless we
+        //peek at the scheduler data structures here which we don't want to
+        if(pr<oldActualPrio) FastPauseKernelLock::pendingWakeup=true;
+    }
+}
+
+void Thread::terminate()
+{
+    //doing a read-modify-write operation on this->status, so pauseKernel is
+    //not enough, we need to disable interrupts
+    FastGlobalIrqLock lock;
+    if(this->flags.isDeleting()) return; //Prevent sleep interruption abuse
+    this->flags.IRQsetDeleting();
+    this->flags.IRQclearSleepAndWait(this); //Interruptibility
+}
+
+bool Thread::testTerminate()
+{
+    return getCurrentThread()->flags.isDeleting();
+}
+
+void Thread::detach()
+{
+    FastGlobalIrqLock lock;
+    if(extraChecks!=ExtraChecks::None)
+        if(this!=Thread::IRQgetCurrentThread() && Thread::IRQexists(this)==false)
+            return;
+
+    this->flags.IRQsetDetached();
+    
+    //we detached a terminated thread, so its memory needs to be deallocated
+    if(this->flags.isZombie()) atomicSwap(&existDeleted,1);
+
+    //Corner case: detaching a thread, but somebody else already called join
+    //on it. This makes join return false instead of deadlocking
+    Thread *t=this->joinData.waitingForJoin;
+    if(t!=nullptr)
+    {
+        //joinData is an union, so its content can be an invalid thread
+        //this happens if detaching a thread that has already terminated
+        if(this->flags.isZombie()==false)
+        {
+            //Wake thread, or it might sleep forever
+            t->flags.IRQclearJoinWait(t);
+            // Heuristic load balancing: threads waiting on join get preferentially
+            // allocated to higher core numbers
+            if(IRQconsiderRescheduling<Hlb::FromLast>(t,getCurrentCoreId()))
+                IRQinvokeScheduler();
+        }
+    }
+}
+
+bool Thread::isDetached() const
+{
+    return this->flags.isDetached();
+}
+
+bool Thread::join(void** result)
+{
+    {
+        FastGlobalIrqLock dLock;
+        Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+        if(this==cur) return false;
+        if(extraChecks!=ExtraChecks::None)
+            if(Thread::IRQexists(this)==false) return false;
+        if(this->flags.isDetached()) return false;
+        if(this->flags.isZombie()==false)
+        {
+            //Another thread already called join on toJoin
+            if(this->joinData.waitingForJoin!=nullptr) return false;
+
+            this->joinData.waitingForJoin=cur;
+            for(;;)
+            {
+                //Wait
+                cur->flags.IRQsetJoinWait(cur);
+                IRQinvokeScheduler();
+                {
+                    FastGlobalIrqUnlock eLock(dLock);
+                    //Interrupts are enabled, context switch happens
+                }
+                if(extraChecks!=ExtraChecks::None)
+                    if(Thread::IRQexists(this)==false) return false;
+                if(this->flags.isDetached()) return false;
+                if(this->flags.isZombie()) break;
+            }
+        }
+        //Thread deleted, complete join procedure
+        //Setting detached flag will make isDeleted() return true,
+        //so its memory can be deallocated
+        this->flags.IRQsetDetached();
+        if(result!=nullptr) *result=this->joinData.result;
+    }
+    //Since there is surely one dead thread, deallocate it immediately
+    //to free its memory as soon as possible
+    Scheduler::removeDeadThreads();
+    return true;
+}
+
+bool Thread::setAffinity(CpuSet affinity)
+{
+    #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    if(affinity==0) return false;
+    if(affinity>unrestrictedAffinityMask) return false;
+    {
+        FastGlobalIrqLock dLock;
+        if(extraChecks!=ExtraChecks::None)
+            if(this!=Thread::IRQgetCurrentThread() && Thread::IRQexists(this)==false)
+                return false;
+        this->affinity=affinity;
+        for(int i=0;i<CPU_NUM_CORES;i++)
+        {
+            if(const_cast<Thread*>(runningThreads[i])!=this) continue;
+            // Thread whose affinity was changed is currently running on a core,
+            // check if it's compatible with it
+            if((affinity & (1<<i))==0)
+            {
+                if(i==getCurrentCoreId()) IRQinvokeScheduler();
+                else IRQinvokeSchedulerOnCore(i);
+            }
+            break;
+        }
+    }
+    return true;
+    #else //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    // Architecture is either single core or scheduler support for affinity not
+    // enabled. Only return success if the requested affinity is unrestricted
+    return affinity==unrestrictedAffinityMask;
+    #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+}
+
+CpuSet Thread::getAffinity()
+{
+    #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    FastGlobalIrqLock dLock;
+    return affinity;
+    #else //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    return unrestrictedAffinityMask;
+    #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+}
+
+const unsigned int *Thread::getStackBottom()
+{
+    return getCurrentThread()->watermark+(WATERMARK_LEN/sizeof(unsigned int));
+}
+
+int Thread::getStackSize()
+{
+    return getCurrentThread()->stacksize;
+}
+
+#ifdef WITH_PROCESSES
+
+void Thread::IRQhandleSvc()
+{
+    FastGlobalLockFromIrq lock;
+    IRQstackOverflowCheck();
+    int coreId=getCurrentCoreId();
+    Thread *cur=const_cast<Thread*>(runningThreads[coreId]);
+    if(cur->proc==kernelProcess) errorHandler(Error::UNEXPECTED);
+    //We know it's not the kernel, so the cast is safe
+    auto *proc=static_cast<Process*>(cur->proc);
+    //Don't process syscall if a fault already happened. This can happen if
+    //the stack overflow check triggered and caused a fault.
+    if(proc->fault.IRQfaultHappened()) return;
+
+    //Note that it is required to use ctxsave and not cur->ctxsave because
+    //at this time we do not know if the active context is user or kernel
+    switch(static_cast<Syscall>(peekSyscallId(
+        const_cast<unsigned int*>(::ctxsave[coreId]))))
+    {
+        case Syscall::YIELD:
+            //Yield syscall is handled here in the IRQ by calling the scheduler
+            Scheduler::IRQrunScheduler();
+            return;
+        case Syscall::USERSPACE:
+            //Userspace syscall is handled here in the IRQ by switching to userspace
+            cur->flags.IRQsetUserspace(true);
+            ::ctxsave[coreId]=cur->userCtxsave;
+            proc->mpu.IRQenable();
+            break;
+        default:
+            //All other syscalls are handled by switching to kernelspace
+            cur->flags.IRQsetUserspace(false);
+            ::ctxsave[coreId]=cur->ctxsave;
+            MPUConfiguration::IRQdisable();
+            break;
+    }
+}
+
+bool Thread::IRQreportFault(const FaultData& fault)
+{
+    Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+    if(cur->flags.isInUserspace()==false || cur->proc==kernelProcess) return false;
+    //We know it's not the kernel, so the cast is safe
+    auto *proc=static_cast<Process*>(cur->proc);
+    //Record the fault for later reporting.
+    proc->fault=fault;
+    proc->fault.IRQtryAddProgramCounter(cur->userCtxsave,proc->mpu);
+    //Switch to kernel mode
+    cur->flags.IRQsetUserspace(false);
+    ::ctxsave[getCurrentCoreId()]=cur->ctxsave;
+    MPUConfiguration::IRQdisable();
+    return true;
+}
+
+SyscallParameters Thread::switchToUserspace()
+{
+    portableSwitchToUserspace();
+    SyscallParameters result(Thread::getCurrentThread()->userCtxsave);
+    return result;
+}
+
+Thread *Thread::createUserspace(void *(*startfunc)(void *), Process *proc)
+{
+    Thread *thread=doCreate(startfunc,SYSTEM_MODE_PROCESS_STACK_SIZE,nullptr,
+            Thread::JOINABLE,false);
+    if(thread==nullptr) return nullptr;
+
+    unsigned int *base=thread->watermark;
+    try {
+        thread->userCtxsave=new unsigned int[CTXSAVE_SIZE];
+    } catch(bad_alloc&) {
+        thread->~Thread();
+        free(base); //Delete ALL thread memory
+        return nullptr;//Error
+    }
+    
+    thread->proc=proc;
+    thread->flags.IRQsetWait(thread); //Thread is not yet ready
+    
+    //Add thread to thread list
+    bool result;
+    {
+        FastGlobalIrqLock dLock;
+        result=Scheduler::IRQaddThread(thread,DEFAULT_PRIORITY);
+    }
+    if(result==false)
+    {
+        //Reached limit on number of threads
+        base=thread->watermark;
+        thread->~Thread();
+        free(base); //Delete ALL thread memory
+        return nullptr;
+    }
+
+    return thread;
+}
+
+void Thread::setupUserspaceContext(unsigned int entry, int argc, void *argvSp,
+    void *envp, unsigned int *gotBase, unsigned int stackSize)
+{
+    //Fill watermark and stack
+    char *base=reinterpret_cast<char*>(argvSp)-stackSize-WATERMARK_LEN;
+    memset(base, WATERMARK_FILL, WATERMARK_LEN);
+    memset(base+WATERMARK_LEN, STACK_FILL, stackSize);
+    Thread *cur=getCurrentThread();
+    cur->userWatermark=reinterpret_cast<unsigned int*>(base);
+    //Initialize registers
+    //NOTE: for the main thread in a process userWatermark is also the end of
+    //the heap, used by _sbrk_r. When we'll implement threads in processes that
+    //pointer will just point to the watermark end of the thread, but userspace
+    //threads can just ignore that value so we'll pass it unconditionally
+    initUserThreadCtxsave(cur->userCtxsave,entry,argc,argvSp,envp,
+                          gotBase,cur->userWatermark);
+}
+
+#endif //WITH_PROCESSES
+
+Thread::Thread(unsigned int *watermark, unsigned int stacksize,
+               bool defaultReent) : schedData(), savedPriority(0),
+               mutexLocked(nullptr), mutexWaiting(nullptr), waitQueueItem(this),
+               watermark(watermark), ctxsave(), stacksize(stacksize)
+{
+    joinData.waitingForJoin=nullptr;
+    if(defaultReent) cReentrancyData=_GLOBAL_REENT;
+    else {
+        cReentrancyData=static_cast<struct _reent*>(malloc(sizeof(_reent)));
+        if(cReentrancyData) _REENT_INIT_PTR(cReentrancyData);
+    }
+    #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    affinity=unrestrictedAffinityMask;
+    #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    #ifdef WITH_PROCESSES
+    proc=kernelProcess;
+    userCtxsave=nullptr;
+    #endif //WITH_PROCESSES
+    #ifdef WITH_PTHREAD_KEYS
+    memset(pthreadKeyValues,0,sizeof(pthreadKeyValues));
+    #endif //WITH_PTHREAD_KEYS
+}
+
+Thread::~Thread()
+{
+    if(cReentrancyData && cReentrancyData!=_GLOBAL_REENT)
+    {
+        _reclaim_reent(cReentrancyData);
+        free(cReentrancyData);
+    }
+    #ifdef WITH_PROCESSES
+    if(userCtxsave) delete[] userCtxsave;
+    #endif //WITH_PROCESSES
+}
+
+Thread *Thread::doCreate(void*(*startfunc)(void*), unsigned int stacksize,
+                      void* argv, Options options, bool defaultReent)
+{
+    unsigned int fullStackSize=WATERMARK_LEN+CTXSAVE_ON_STACK+stacksize;
+
+    //Align fullStackSize to the platform required stack alignment
+    fullStackSize+=CTXSAVE_STACK_ALIGNMENT-1;
+    fullStackSize/=CTXSAVE_STACK_ALIGNMENT;
+    fullStackSize*=CTXSAVE_STACK_ALIGNMENT;
+
+    //Allocate memory for the thread, return if fail
+    unsigned int *base=static_cast<unsigned int*>(malloc(sizeof(Thread)+
+            fullStackSize));
+    if(base==nullptr) return nullptr;
+
+    //At the top of thread memory allocate the Thread class with placement new
+    void *threadClass=base+(fullStackSize/sizeof(unsigned int));
+    Thread *thread=new (threadClass) Thread(base,stacksize,defaultReent);
+
+    if(thread->cReentrancyData==nullptr)
+    {
+         thread->~Thread();
+         free(base); //Delete ALL thread memory
+         return nullptr;
+    }
+
+    //Fill watermark and stack
+    memset(base, WATERMARK_FILL, WATERMARK_LEN);
+    base+=WATERMARK_LEN/sizeof(unsigned int);
+    memset(base, STACK_FILL, fullStackSize-WATERMARK_LEN);
+
+    //On some architectures some registers are saved on the stack, therefore
+    //initKernelThreadCtxsave *must* be called after filling the stack.
+    initKernelThreadCtxsave(thread->ctxsave,&Thread::threadLauncher,
+                            reinterpret_cast<unsigned int*>(thread),base,
+                            startfunc,argv);
+
+    if(options & DETACHED) thread->flags.IRQsetDetached();
+    return thread;
+}
+
+void Thread::threadLauncher(void *(*threadfunc)(void*), void *argv)
+{
+    void *result=nullptr;
+    #ifdef __NO_EXCEPTIONS
+    result=threadfunc(argv);
+    #else //__NO_EXCEPTIONS
+    try {
+        result=threadfunc(argv);
+    #ifdef WITH_PTHREAD_EXIT
+    } catch(PthreadExitException& e) {
+        result=e.getReturnValue();
+    #endif //WITH_PTHREAD_EXIT
+    } catch(exception& e) {
+        errorLog("***An exception propagated through a thread\n");
+        errorLog("what():%s\n",e.what());
+    } catch(...) {
+        errorLog("***An exception propagated through a thread\n");
+    }
+    #endif //__NO_EXCEPTIONS
+    //Thread returned from its entry point, so delete it
+
+    Thread* cur=getCurrentThread();
+    #ifdef WITH_PTHREAD_KEYS
+    callPthreadKeyDestructors(cur->pthreadKeyValues);
+    #endif //WITH_PTHREAD_KEYS
+    //Since the thread is running, it cannot be in the sleepingList, so no need
+    //to remove it from the list
+    {
+        FastGlobalIrqLock lock;
+        cur->flags.IRQsetDeleted(cur);
+
+        if(cur->flags.isDetached()==false)
+        {
+            //If thread is joinable, handle join
+            Thread *t=cur->joinData.waitingForJoin;
+            //Wake thread
+            if(t!=nullptr)
+            {
+                t->flags.IRQclearJoinWait(t);
+                // Here the waiting thread changed state to ready, but there's
+                // no need to call IRQconsiderRescheduling as the current thread
+                // is also about to terminate, thus a few lines below we
+                // unconditionally call the scheduler anyway
+            }
+            //Set result
+            cur->joinData.result=result;
+        } else {
+            //If thread is detached, memory can be deallocated immediately
+            atomicSwap(&existDeleted,1);
+        }
+        IRQinvokeScheduler();
+    }
+    //When interrupts are enabled back, the IRQinvokeScheduler becomes
+    //effective and the scheduler is called. Since the thread is now deleted
+    //will never reach here
+    errorHandler(Error::UNEXPECTED);
+}
+
+void Thread::PKrestartKernelAndWaitImpl()
+{
+    // WARNING: The implementation of this function must remain synchronized
+    // with its IRQ-based counterpart (IRQglobalIrqUnlockAndWaitImpl)
+    fastDisableIrq();
+
+    // Put the thread the sleep. We could get the current thread by calling
+    // Thread::IRQgetCurrentThread but there is logic there that we want to
+    // avoid.
+    Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+    {
+        FastGlobalLockFromIrq lock;
+        cur->flags.IRQsetWait(cur);
+    }
+
+    // Save Pk lock state, yield, and restore lock state.
+    // We do not save/restore the state of the GIL because it's not taken
+    // (if it was, somebody is violating the constraints on when a PK function
+    // can be called).
+    FastPauseKernelLock::irqDisabledFastUnlock();
+    IRQinvokeScheduler();
+    // On cores with no PendSV-equivalent (CK803S/HD2), IRQinvokeScheduler()
+    // above could only set s_schedPending (interrupts are off here), and a
+    // bare fastEnableIrq() has no drain: this thread -- already marked
+    // WAITING -- would keep RUNNING until the next IRQ takes the deferred
+    // switch, racing the wakeup path hundreds of times a second.  That race
+    // was the HD2's stochastic post-boot hard lock (every fatal resume frame
+    // pointed at this wait path; root-caused 2026-06-13 via reset-surviving
+    // breadcrumb forensics).  Claim and take the switch ourselves, mirroring
+    // FastGlobalIrqLock::unlock()'s proven drain.  On PendSV architectures
+    // s_schedPending is never set, so this is a no-op and the switch happens
+    // at fastEnableIrq() exactly as before.
+    bool pending=s_schedPending;
+    s_schedPending=false;
+    fastEnableIrq();
+    if(pending) Thread::yield();
+    //Interrupts are enabled, context switch happens, return after wakeup
+    FastPauseKernelLock::lock();
+}
+
+void Thread::IRQglobalIrqUnlockAndWaitImpl()
+{
+    // Put the thread the sleep. We could get the current thread by calling
+    // Thread::IRQgetCurrentThread but there is logic there that we want to
+    // avoid.
+    Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+    cur->flags.IRQsetWait(cur);
+
+    // Unlock GIL, yield, and relock again
+    // Note that we are not sure here whether we have taken the PK lock or not.
+    // If the PK lock appears taken, it might be currently taken by another core
+    // and as a result we cannot touch it!
+    // So better to leave it alone. But as a side-effect we cannot upgrade a PK
+    // lock to a GIL and then use this function!
+    auto gilTakenRecursively=GlobalIrqLock::irqDisabledInLockedSection();
+    IRQinvokeScheduler();
+    GlobalIrqLock::unlock();
+    //Interrupts are enabled, context switch happens, return after wakeup
+    if(gilTakenRecursively) GlobalIrqLock::lock();
+    else FastGlobalIrqLock::lock(); //The GIL was taken using the fast primitives
+}
+
+TimedWaitResult Thread::PKrestartKernelAndTimedWaitImpl(long long absoluteTimeNs)
+{
+    // WARNING: The implementation of this function must remain synchronized
+    // with its IRQ-based counterpart (IRQglobalIrqUnlockAndTimedWaitImpl)
+    fastDisableIrq();
+
+    // Put the thread to sleep.
+    absoluteTimeNs=max(absoluteTimeNs,100000LL);
+    Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+    SleepToken st(cur,absoluteTimeNs);
+    {
+        FastGlobalLockFromIrq lock;
+        cur->flags.IRQsetWait(cur); //timedWait thread: set wait flag
+        sleepingList.enqueue(&st);
+        IRQupdateOsTimer();
+    }
+
+    // Save Pk lock state, yield, and restore lock state.
+    // We do not save/restore the state of the GIL because it's not taken
+    // (if it was, somebody is violating the constraints on when a PK function
+    // can be called)
+    FastPauseKernelLock::irqDisabledFastUnlock();
+    IRQinvokeScheduler();
+    fastEnableIrq();
+    //Interrupts are enabled, context switch happens, return after wakeup
+    fastDisableIrq();
+    FastPauseKernelLock::irqDisabledFastLock();
+
+    // Remove us from the sleeping list and check how we were woken up.
+    // If the thread was still in the sleeping list, it was woken up by a wakeup()
+    bool removed;
+    {
+        FastGlobalLockFromIrq lock;
+        removed=sleepingList.remove(&st);
+    }
+    fastEnableIrq();
+    return removed ? TimedWaitResult::NoTimeout : TimedWaitResult::Timeout;
+}
+
+TimedWaitResult Thread::IRQglobalIrqUnlockAndTimedWaitImpl(long long absoluteTimeNs)
+{
+    // Put the thread to sleep.
+    absoluteTimeNs=max(absoluteTimeNs,100000LL);
+    Thread *cur=const_cast<Thread*>(runningThreads[getCurrentCoreId()]);
+    SleepToken st(cur,absoluteTimeNs);
+    cur->flags.IRQsetWait(cur); //timedWait thread: set wait flag
+    sleepingList.enqueue(&st);
+    IRQupdateOsTimer();
+
+    // Unlock GIL, yield, and relock again
+    auto gilTakenRecursively=GlobalIrqLock::irqDisabledInLockedSection();
+    IRQinvokeScheduler();
+    GlobalIrqLock::unlock();
+    //Interrupts are enabled, context switch happens, return after wakeup
+    if(gilTakenRecursively) GlobalIrqLock::lock();
+    else FastGlobalIrqLock::lock(); //The GIL was taken using the fast primitives
+
+    // Remove us from the sleeping list and check how we were woken up.
+    // If the thread was still in the sleeping list, it was woken up by a wakeup()
+    bool removed=sleepingList.remove(&st);
+    return removed ? TimedWaitResult::NoTimeout : TimedWaitResult::Timeout;
+}
+
+template<Thread::Hlb b>
+inline bool Thread::IRQconsiderRescheduling(Thread *t, unsigned char excludedCoreId)
+{
+    auto wokenPrio=t->IRQgetPriority();
+    #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    auto affinity=t->affinity;
+    #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    if(b==Hlb::FromFirst)
+    {
+        for(int i=0;i<CPU_NUM_CORES;i++)
+        {
+            #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+            if((affinity & (1<<i))==0) continue;
+            #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+            if(const_cast<Thread*>(runningThreads[i])->IRQgetPriority()<wokenPrio)
+            {
+                if(i==excludedCoreId) return true;
+                IRQinvokeSchedulerOnCore(i);
+                return false;
+            }
+        }
+    } else {
+        for(int i=CPU_NUM_CORES-1;i>=0;i--)
+        {
+            #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+            if((affinity & (1<<i))==0) continue;
+            #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+            if(const_cast<Thread*>(runningThreads[i])->IRQgetPriority()<wokenPrio)
+            {
+                if(i==excludedCoreId) return true;
+                IRQinvokeSchedulerOnCore(i);
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
+Thread *Thread::IRQallocateIdleThread()
+{
+    //NOTE: this function is only called once before the kernel is started, so
+    //there are no concurrency issues, not even with interrupts
+
+    // Create the idle and main thread
+    auto *idle=Thread::doCreate(idleThreadCore0,STACK_IDLE,nullptr,Thread::DETACHED,true);
+    if(idle==nullptr) errorHandler(Error::OUT_OF_MEMORY);
+
+    // runningThreads[0] must point to a valid thread, so we make it point
+    // to the the idle one. Moreover, we must be on core 0 during boot
+    if(getCurrentCoreId()!=0) errorHandler(Error::UNEXPECTED);
+    runningThreads[0]=idle;
+    return idle;
+}
+
+struct _reent *Thread::getCReent()
+{
+    return getCurrentThread()->cReentrancyData;
+}
+
+//
+// class ThreadFlags
+//
+
+void Thread::ThreadFlags::IRQsetWait(Thread *self)
+{
+    flags |= WAIT;
+    Scheduler::IRQwaitStatusHook(self);
+}
+
+void Thread::ThreadFlags::IRQclearWait(Thread *self)
+{
+    bool wasReady=isReady();
+    flags &= ~WAIT;
+    if(wasReady==false && isReady()) Scheduler::IRQwokenThread(self);
+    Scheduler::IRQwaitStatusHook(self);
+}
+
+void Thread::ThreadFlags::IRQsetSleep(Thread *self)
+{
+    flags |= SLEEP;
+    Scheduler::IRQwaitStatusHook(self);
+}
+
+void Thread::ThreadFlags::IRQclearSleepAndWait(Thread *self)
+{
+    bool wasReady=isReady();
+    flags &= ~(WAIT | SLEEP);
+    if(wasReady==false && isReady()) Scheduler::IRQwokenThread(self);
+    Scheduler::IRQwaitStatusHook(self);
+}
+
+void Thread::ThreadFlags::IRQsetJoinWait(Thread *self)
+{
+    flags |= WAIT_JOIN;
+    Scheduler::IRQwaitStatusHook(self);
+}
+
+void Thread::ThreadFlags::IRQclearJoinWait(Thread *self)
+{
+    bool wasReady=isReady();
+    flags &= ~WAIT_JOIN;
+    if(wasReady==false && isReady()) Scheduler::IRQwokenThread(self);
+    Scheduler::IRQwaitStatusHook(self);
+}
+
+void Thread::ThreadFlags::IRQsetDeleted(Thread *self)
+{
+    flags |= DELETED;
+    Scheduler::IRQwaitStatusHook(self);
+}
+
+} //namespace miosix

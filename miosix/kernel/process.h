@@ -32,11 +32,12 @@
 #include <list>
 #include <set>
 #include <sys/types.h>
-#include "kernel.h"
+#include "thread.h"
 #include "sync.h"
 #include "elf_program.h"
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 #include "filesystem/file_access.h"
+#include "interfaces_private/userspace.h" //TODO: avoid including private header
 
 #ifdef WITH_PROCESSES
 
@@ -207,17 +208,11 @@ private:
      * \return true if the process can continue running, false if it has
      * terminated
      */
-    SvcResult handleSvc(miosix_private::SyscallParameters sp);
-    
-    /**
-     * \return an unique pid that is not zero and is not already in use in the
-     * system, used to assign a pid to a new process.<br>
-     */
-    static pid_t getNewPid();
+    SvcResult handleSvc(SyscallParameters sp);
     
     ElfProgram program; ///<The program that is running inside the process
     ProcessImage image; ///<The RAM image of a process
-    miosix_private::FaultData fault; ///< Contains information about faults
+    FaultData fault; ///< Contains information about faults
     MPUConfiguration mpu; ///<Memory protection data
     int argc;   ///< Process argument count
     void *argvSp; ///< Ptr to argument array within ProcessImage and initial sp
@@ -320,10 +315,10 @@ private:
  */
 enum class Syscall
 {
-    // Yield. Can be called both by kernel threads and process threads both in
-    // userspace and kernelspace mode. It causes the scheduler to switch to
-    // another thread. It is the only SVC that is available also when processes
-    // are disabled in miosix_config.h. No parameters, no return value.
+    // Yield. It causes the scheduler to switch to another thread, if available.
+    // No parameters, no return value. In Miosix v2.xx it was also used by
+    //kernel threads to invoke the scheduler as the underlying implementation of
+    //Thread::yield() but use by kernel threads is discontinued.
     YIELD=0,
     // Back to userspace. It is used by process threads running in kernelspace
     // mode to return to userspace mode after completing an SVC. If called by a
@@ -333,7 +328,7 @@ enum class Syscall
 
     // All other syscalls. Use of these SVC by kernel threads is forbidden.
     // Kernel should just call the functions with the corresponding name
-    // (kercalls) in stdlib_integration
+    // implemented in the kercalls directory
 
     // File/directory syscalls
     OPEN      = 2,
@@ -368,9 +363,11 @@ enum class Syscall
     DUP2      = 31,
     PIPE      = 32,
     ACCESS    = 33,
-    //From 34 to 37 reserved for future use
+    //From 34 to 35 reserved for future use
 
     // Time syscalls
+    GETTIME64   = 36,
+    NANOSLEEP64 = 37,
     GETTIME   = 38,
     SETTIME   = 39,
     NANOSLEEP = 40,
@@ -396,6 +393,9 @@ enum class Syscall
     MOUNT     = 56,
     UMOUNT    = 57,
     MKFS      = 58, //Moving filesystem creation code to kernel
+
+    // Misc syscalls
+    SYSCONF   = 59
 };
 
 } //namespace miosix

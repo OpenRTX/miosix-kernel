@@ -1,5 +1,5 @@
 # Exclude doxygen
-miosix/_doc/doxygen/html/*
+doc/doxygen/html/*
 
 # Exclude temporary files
 main.elf
@@ -15,11 +15,12 @@ image.uf2
 *.d
 
 # Exclude build directories and host executables
-miosix/_tools/filesystems/build
-miosix/_tools/filesystems/buildromfs
-miosix/_tools/bin2uf2/build
-miosix/_tools/bin2uf2/bin2uf2
+tools/bin2uf2/bin2uf2
+
+# Exclude all build directories
+build
 
 # Exclude Mac OS X temporary
 ._*
 .DS_Store
+build-docker/

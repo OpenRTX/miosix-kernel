@@ -28,7 +28,7 @@
 #include "../filesystem/devfs/devfs.h"
 #include "queue.h"
 #include <vector>
-#include "kernel.h"
+#include "thread.h"
 
 using namespace std;
 

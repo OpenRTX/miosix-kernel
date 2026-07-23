@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2010, 2011, 2012 by Terraneo Federico                   *
+ *   Copyright (C) 2010-2025 by Terraneo Federico                          *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -26,263 +26,349 @@
  ***************************************************************************/
 
 #include "priority_scheduler.h"
+#include "kernel/scheduler/scheduler.h"
 #include "kernel/error.h"
 #include "kernel/process.h"
-#include "interfaces/os_timer.h"
+#include "interfaces_private/cpu.h"
+#include "interfaces_private/smp.h"
+#include "kernel/cpu_time_counter.h"
 #include <limits>
+
+using namespace std;
 
 #ifdef SCHED_TYPE_PRIORITY
 namespace miosix {
 
-//These are defined in kernel.cpp
-extern volatile Thread *runningThread;
-extern volatile int kernelRunning;
-extern volatile bool pendingWakeup;
-extern IntrusiveList<SleepData> sleepingList;
-
-//Internal data
-static long long nextPeriodicPreemption=std::numeric_limits<long long>::max();
+//These are defined in thread.cpp
+extern volatile Thread *runningThreads[CPU_NUM_CORES];
 
 //
 // class PriorityScheduler
 //
 
-bool PriorityScheduler::PKaddThread(Thread *thread,
+bool PriorityScheduler::IRQaddThread(Thread *thread,
         PrioritySchedulerPriority priority)
 {
     thread->schedData.priority=priority;
-    if(threadList[priority.get()]==nullptr)
-    {
-        threadList[priority.get()]=thread;
-        thread->schedData.next=thread;//Circular list
-    } else {
-        thread->schedData.next=threadList[priority.get()]->schedData.next;
-        threadList[priority.get()]->schedData.next=thread;
-    }
+    //Priority and savedPriority must be the same except when locking a mutex
+    //with priority inheritance. A newly created thread isn't yet locking mutex
+    thread->savedPriority=priority;
+    #ifdef WITH_PROCESSES
+    // Check isReady() as processes are initially created in not ready state
+    if(thread->flags.isReady()==false) notReadyThreads.push_front(thread);
+    else
+    #endif //WITH_PROCESSES
+    readyThreads[priority.get()].push_back(thread);
     return true;
 }
 
-bool PriorityScheduler::PKexists(Thread *thread)
+bool PriorityScheduler::IRQexists(Thread *thread)
 {
-    for(int i=PRIORITY_MAX-1;i>=0;i--)
-    {
-        if(threadList[i]==nullptr) continue;
-        Thread *temp=threadList[i];
-        for(;;)
-        {
-            if((temp==thread) && (!temp->flags.isDeleted())) return true;
-            temp=temp->schedData.next;
-            if(temp==threadList[i]) break;
-        }
-    }
+    for(int i=0;i<CPU_NUM_CORES;i++)
+        if(runningThreads[i]==thread) return !thread->flags.isDeleted();
+    for(int i=NUM_PRIORITIES-1;i>=0;i--)
+        for(auto t : readyThreads[i]) if(t==thread) return true;
+    for(auto t : notReadyThreads) if(t==thread) return !thread->flags.isDeleted();
     return false;
 }
 
-void PriorityScheduler::PKremoveDeadThreads()
+void PriorityScheduler::removeDeadThreads()
 {
-    for(int i=PRIORITY_MAX-1;i>=0;i--)
+    for(;;)
     {
-        if(threadList[i]==nullptr) continue;
-        bool first=false;//If false the tail of the list hasn't been calculated
-        Thread *tail=nullptr;//Tail of the list
-        //Special case: removing first element in the list
-        while(threadList[i]->flags.isDeleted())
+        Thread *t;
         {
-            if(threadList[i]->schedData.next==threadList[i])
-            {
-                //Only one element in the list
-                //Call destructor manually because of placement new
-                void *base=threadList[i]->watermark;
-                threadList[i]->~Thread();
-                free(base); //Delete ALL thread memory
-                threadList[i]=nullptr;
-                break;
-            }
-            //If it is the first time the tail of the list hasn't
-            //been calculated
-            if(first==false)
-            {
-                first=true;
-                tail=threadList[i];
-                while(tail->schedData.next!=threadList[i])
-                    tail=tail->schedData.next;
-            }
-            Thread *d=threadList[i];//Save a pointer to the thread
-            threadList[i]=threadList[i]->schedData.next;//Remove from list
-            //Fix the tail of the circular list
-            tail->schedData.next=threadList[i];
-            //Call destructor manually because of placement new
-            void *base=d->watermark;
-            d->~Thread();
-            free(base);//Delete ALL thread memory
+            FastGlobalIrqLock dLock;
+            if(notReadyThreads.empty()) return;
+            t=notReadyThreads.back();
+            // All deleted threads are at the bottom of the list, so the first
+            // not deleted we found means there are no more
+            if(t->flags.isDeleted()==false) return;
+            notReadyThreads.pop_back();
         }
-        if(threadList[i]==nullptr) continue;
-        //If it comes here, the first item is not nullptr, and doesn't have
-        //to be deleted General case: removing items not at the first
-        //place
-        Thread *temp=threadList[i];
-        for(;;)
-        {
-            if(temp->schedData.next==threadList[i]) break;
-            if(temp->schedData.next->flags.isDeleted())
-            {
-                Thread *d=temp->schedData.next;//Save a pointer to the thread
-                //Remove from list
-                temp->schedData.next=temp->schedData.next->schedData.next;
-                //Call destructor manually because of placement new
-                void *base=d->watermark;
-                d->~Thread();
-                free(base);//Delete ALL thread memory
-            } else temp=temp->schedData.next;
-        }
+        //Optimization: don't keep the lock while thread is being deleted
+        void *base=t->watermark;
+        t->~Thread();//Call destructor manually because of placement new
+        free(base);  //Delete ALL thread memory
     }
 }
 
-void PriorityScheduler::PKsetPriority(Thread *thread,
+void PriorityScheduler::IRQsetPriority(Thread *thread,
         PrioritySchedulerPriority newPriority)
 {
-    PrioritySchedulerPriority oldPriority=thread->PKgetPriority();
-    //First set priority to the new value
-    thread->schedData.priority=newPriority;
-    //Then remove the thread from its old list
-    if(threadList[oldPriority.get()]==thread)
+    if(extraChecks==ExtraChecks::Kernel)
+        if(thread->flags.isZombie()) errorHandler(Error::UNEXPECTED);
+
+    // If thread is running it is not in any list, only change priority value
+    for(int i=0;i<CPU_NUM_CORES;i++)
     {
-        if(threadList[oldPriority.get()]->schedData.next==
-                threadList[oldPriority.get()])
+        if(thread==runningThreads[i])
         {
-            //Only one element in the list
-            threadList[oldPriority.get()]=nullptr;
-        } else {
-            Thread *tail=threadList[oldPriority.get()];//Tail of the list
-            while(tail->schedData.next!=threadList[oldPriority.get()])
-                tail=tail->schedData.next;
-            //Remove
-            threadList[oldPriority.get()]=
-                    threadList[oldPriority.get()]->schedData.next;
-            //Fix tail of the circular list
-            tail->schedData.next=threadList[oldPriority.get()];
-        }
-    } else {
-        //If it comes here, the first item doesn't have to be removed
-        //General case: removing item not at the first place
-        Thread *temp=threadList[oldPriority.get()];
-        for(;;)
-        {
-            if(temp->schedData.next==threadList[oldPriority.get()])
-            {
-                //After walking all elements in the list the thread wasn't found
-                //This should never happen
-                errorHandler(UNEXPECTED);
-            }
-            if(temp->schedData.next==thread)
-            {
-                //Remove from list
-                temp->schedData.next=temp->schedData.next->schedData.next;
-                break;
-            } else temp=temp->schedData.next;
+            thread->schedData.priority=newPriority;
+            return;
         }
     }
-    //Last insert the thread in the new list
-    if(threadList[newPriority.get()]==nullptr)
+    // If thread is not ready it will remain in the notReadyThreads list,
+    // only change priority value
+    if(thread->flags.isReady()==false)
     {
-        threadList[newPriority.get()]=thread;
-        thread->schedData.next=thread;//Circular list
-    } else {
-        thread->schedData.next=threadList[newPriority.get()]->schedData.next;
-        threadList[newPriority.get()]->schedData.next=thread;
-    }
-}
-
-void PriorityScheduler::IRQsetIdleThread(Thread *idleThread)
-{
-    idleThread->schedData.priority=-1;
-    idle=idleThread;
-}
-
-long long PriorityScheduler::IRQgetNextPreemption()
-{
-    return nextPeriodicPreemption;
-}
-
-static long long IRQsetNextPreemption(bool runningIdleThread)
-{
-    long long first;
-    if(sleepingList.empty()) first=std::numeric_limits<long long>::max();
-    else first=sleepingList.front()->wakeupTime;
-
-    long long t=IRQgetTime();
-    if(runningIdleThread) nextPeriodicPreemption=first;
-    else nextPeriodicPreemption=std::min(first,t+MAX_TIME_SLICE);
-
-    //We could not set an interrupt if the sleeping list is empty and runningThread
-    //is idle but there's no such hurry to run idle anyway, so why bother?
-    internal::IRQosTimerSetInterrupt(nextPeriodicPreemption);
-    return t;
-}
-
-void PriorityScheduler::IRQfindNextThread()
-{
-    if(kernelRunning!=0) //If kernel is paused, do nothing
-    {
-        pendingWakeup=true;
+        thread->schedData.priority=newPriority;
         return;
     }
-    #ifdef WITH_CPU_TIME_COUNTER
-    Thread *prev=const_cast<Thread*>(runningThread);
-    #endif // WITH_CPU_TIME_COUNTER
-    for(int i=PRIORITY_MAX-1;i>=0;i--)
+    // Ready threads need to change list, remove the thread from its old list
+    readyThreads[thread->schedData.priority.get()].removeFast(thread);
+    // Set priority to the new value
+    thread->schedData.priority=newPriority;
+    // Last insert the thread in the new list
+    readyThreads[newPriority.get()].push_back(thread);
+}
+
+void PriorityScheduler::IRQsetIdleThread(int whichCore, Thread *idleThread)
+{
+    idleThread->schedData.priority=-1;
+    idleThread->savedPriority=-1;
+    idle[whichCore]=idleThread;
+}
+
+void PriorityScheduler::IRQwokenThread(Thread* thread)
+{
+    // NOTE: this check is necessary as there is the corner case of a thread
+    // that has just set itself to sleeping/waiting but it gets woken up before
+    // the scheduler has a chance to run. Thus it is both awakened and running,
+    // and we must not call notReadyThreads.removeFast(thread) if it's not in
+    // that list as it causes undefined behavior
+    for(int i=0;i<CPU_NUM_CORES;i++) if(runningThreads[i]==thread) return;
+    notReadyThreads.removeFast(thread);
+    readyThreads[thread->schedData.priority.get()].push_back(thread);
+}
+
+/*
+ * The scheduler in Miosix 3.0 runs in its dedicated interrupt, which on ARM is
+ * called PendSV. The scheduler has no input parameter that code invoking it
+ * through IRQinvokeScheduler() or IRQinvokeSchedulerOnCore() can pass to it.
+ * Rather, when it is run, it follows a "must preempt" policy. Since it has been
+ * called, it assumes the currently running thread must be unconditionally
+ * descheduled. If the thread is still ready, it is placed at the end of the
+ * ready queue for its priority level. Thus, parts of the kernel that invoke the
+ * scheduler must be mindful not to invoke it unnecessarily (that includes not
+ * invoking it unnecessarily on another core in multi-core architectures), since
+ * doing so causes the currently running thread to be preempted for no reason.
+ * Excluding the cases where a thread blocks for some reason, where obviously
+ * the scheduler must be invoked on the current core, the more complex case of
+ * a thread waking (which could in theory be scheduled on any core) is handled
+ * through the Thread::IRQconsiderRescheduling() function that decides based on
+ * the woken thread priority, the priority of the threads currently running on
+ * each core and optionally the thread's affinity mask on which core should the
+ * scheduler be invoked, if at all.
+ * The last detail that needs to be considered is how to handle multiple threads
+ * waking at the same time. Example code paths include multiple threads sleeping
+ * with the same wakeup time and a thread terminating while another thread is
+ * waiting on join (see Thread::threadLauncher). In such a case there's no easy
+ * way to invoke the scheduler on exactly all the cores needed without
+ * replicating the entire scheduling algorithm in IRQconsiderRescheduling(), and
+ * with the added issue that there could always be a race condition between when
+ * IRQconsiderRescheduling() is run and when the scheduler runs changing the
+ * picture. We deal with this issue by IRQconsiderRescheduling() being stateless
+ * and always make decisions as if a single thread needs to be scheduled.
+ * This may result in the same core being selected for multiple high priority
+ * threads that could instead be scheduled concurrently on multiple cores.
+ * In the scheduler itself, after we schedule a thread, we evaluate the state of
+ * the other cores and we let the scheduler on one core invoke the scheduler
+ * on another core if the invariant that "no thread is ready while a lower
+ * priority thread is running" is broken.
+ */
+
+void PriorityScheduler::IRQrunScheduler()
+{
+    FastGlobalLockFromIrq lock;
+    IRQstackOverflowCheck();
+    //If kernel is paused, preemption is disabled
+    #ifdef WITH_SMP
+    auto coreId=getCurrentCoreId();
+    if(FastPauseKernelLock::holdingCore==coreId)
+    #else
+    constexpr unsigned char coreId=0;
+    if(FastPauseKernelLock::holdingCore==0)
+    #endif
     {
-        if(threadList[i]==nullptr) continue;
-        Thread *temp=threadList[i]->schedData.next;
-        for(;;)
-        {
-            if(temp->flags.isReady())
-            {
-                //Found a READY thread, so run this one
-                runningThread=temp;
-                #ifdef WITH_PROCESSES
-                if(const_cast<Thread*>(runningThread)->flags.isInUserspace()==false)
-                {
-                    ctxsave=runningThread->ctxsave;
-                    MPUConfiguration::IRQdisable();
-                } else {
-                    ctxsave=runningThread->userCtxsave;
-                    //A kernel thread is never in userspace, so the cast is safe
-                    static_cast<Process*>(runningThread->proc)->mpu.IRQenable();
-                }
-                #else //WITH_PROCESSES
-                ctxsave=temp->ctxsave;
-                #endif //WITH_PROCESSES
-                //Rotate to next thread so that next time the list is walked
-                //a different thread, if available, will be chosen first
-                threadList[i]=temp;
-                #ifndef WITH_CPU_TIME_COUNTER
-                IRQsetNextPreemption(false);
-                #else //WITH_CPU_TIME_COUNTER
-                auto t=IRQsetNextPreemption(false);
-                IRQprofileContextSwitch(prev->timeCounterData,temp->timeCounterData,t);
-                #endif //WITH_CPU_TIME_COUNTER
-                return;
-            } else temp=temp->schedData.next;
-            if(temp==threadList[i]->schedData.next) break;
-        }
+        FastPauseKernelLock::pendingWakeup=true;
+        return;
     }
+
+    //If the previously running thread is not idle, we need to put it in a list
+    Thread *prev=const_cast<Thread*>(runningThreads[coreId]);
+    if(prev!=idle[coreId])
+    {
+        // NOTE: notReadyThreads must be pushed back if deleted, front if not
+        // while if ready always back (round-robin)
+        if(prev->flags.isZombie()) [[unlikely]] notReadyThreads.push_back(prev);
+        else if(prev->flags.isReady()==false) notReadyThreads.push_front(prev);
+        else readyThreads[prev->schedData.priority.get()].push_back(prev);
+    }
+    #ifdef WITH_SMP
+    // Cache the priority of all running threads in an array. Note that we're
+    // interested in the priorities after the scheduler is run but we still
+    // don't what the priority will be on the current core as we haven't
+    // done the scheduling yet. However, since this variable is used to decide
+    // if we need to invoke the scheduler on another core we just lie and set
+    // the priority of the current core to the maximum value so as to always
+    // exclude the current core
+    signed char runningPrio[CPU_NUM_CORES];
+    for(int c=0;c<CPU_NUM_CORES;c++)
+        runningPrio[c]=const_cast<Thread*>(runningThreads[c])->schedData.priority.get();
+    runningPrio[coreId]=NUM_PRIORITIES-1;
+    #ifdef WITH_THREAD_AFFINITY
+    int scheduleOnOtherCore=-1;
+    #endif //WITH_THREAD_AFFINITY
+    #endif //WITH_SMP
+    for(int prio=NUM_PRIORITIES-1;prio>=0;prio--)
+    {
+        #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+        // If the kernel is compiled with affinity support we can't just pick
+        // the first thread in the ready list, we need to check the affinity
+        Thread *t=nullptr;
+        for(auto it=begin(readyThreads[prio]);it!=end(readyThreads[prio]);++it)
+        {
+            auto affinity=(*it)->affinity;
+            if(affinity & (1<<coreId))
+            {
+                // Found highest priority thread whose affinity is compatible
+                // with this core. That's the one we'll schedule
+                t=*it;
+                readyThreads[prio].erase(it);
+                break;
+            } else {
+                // Found thread that can't run on this core due to affinity.
+                // On the cores it can run it may however preempt the currently
+                // running thread. We only need to find one such thread though
+                // as if there are more, they will be discovered when the
+                // scheduler is called on the other core (distributed algorithm)
+                if(scheduleOnOtherCore>=0) continue;
+                for(int c=0;c<CPU_NUM_CORES;c++)
+                {
+                    if((affinity & (1<<c))==0) continue;
+                    if(prio<runningPrio[c]) continue;
+                    scheduleOnOtherCore=c;
+                    break;
+                }
+            }
+        }
+        if(t==nullptr) continue;
+        #else //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+        if(readyThreads[prio].empty()) continue;
+        Thread *t=readyThreads[prio].front();
+        readyThreads[prio].pop_front(); //Remove selected thread from list
+        #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+        runningThreads[coreId]=t;
+        #ifdef WITH_PROCESSES
+        if(t->flags.isInUserspace()==false)
+        {
+            ctxsave[coreId]=t->ctxsave;
+            MPUConfiguration::IRQdisable();
+        } else {
+            ctxsave[coreId]=t->userCtxsave;
+            //A kernel thread is never in userspace, so the cast is safe
+            static_cast<Process*>(t->proc)->mpu.IRQenable();
+        }
+        #else //WITH_PROCESSES
+        ctxsave[coreId]=t->ctxsave;
+        #endif //WITH_PROCESSES
+        #ifndef WITH_CPU_TIME_COUNTER
+        Scheduler::IRQcomputePreemption(coreId,MAX_TIME_SLICE);
+        #else //WITH_CPU_TIME_COUNTER
+        auto now=Scheduler::IRQcomputePreemption(coreId,MAX_TIME_SLICE);
+        CPUTimeCounter::IRQprofileContextSwitch(prev,t,now,coreId);
+        #endif //WITH_CPU_TIME_COUNTER
+        #ifdef WITH_SMP
+        // In case multiple threads are woken at the same time, we may have to
+        // schedule more than one higher priority thread than currently running.
+        // When this happens, we need to call the scheduler again on more than
+        // one core. Additionally, if compiling with thread affinity we may have
+        // already found that we need to invoke the scheduler on another core
+        // because a higher priority thread wasn't selected on this core due to
+        // incompatible affinity. In this case skip this algorithm as we don't
+        // need to solve the schedule for all cores, just figuring out that
+        // it's wrong one core is enough. Then the invoked scheduler on that
+        // core will complete the job and figure out if there is the need to
+        // reschedule on yet another core
+        #ifdef WITH_THREAD_AFFINITY
+        // With affinity, see if we find a compatible thread with higher priority
+        if(scheduleOnOtherCore<0)
+        {
+            signed char minRunningPriority=runningPrio[0];
+            for(int c=1;c<CPU_NUM_CORES;c++)
+                minRunningPriority=min(minRunningPriority,runningPrio[c]);
+            // This is a loop in a loop with the same variable to continue from
+            // where we left, but we'll never go back to the outer loop
+            for(;prio>minRunningPriority;prio--)
+            {
+                for(auto it=begin(readyThreads[prio]);it!=end(readyThreads[prio]);++it)
+                {
+                    auto affinity=(*it)->affinity;
+                    for(int c=0;c<CPU_NUM_CORES;c++)
+                    {
+                        if((affinity & (1<<c))==0) continue;
+                        if(prio<runningPrio[c]) continue;
+                        IRQinvokeSchedulerOnCore(c);
+                        goto found;
+                    }
+                }
+            }
+            found:;
+        }
+        #else //WITH_THREAD_AFFINITY
+        // No affinity, just knowing a ready thread exists with higher periority
+        // is enough, it can surely be running on any core
+        signed char minRunningPriority=runningPrio[0];
+        int coreRunningMinPriorityThread=0;
+        for(int c=1;c<CPU_NUM_CORES;c++)
+        {
+            if(runningPrio[c]<minRunningPriority)
+            {
+                minRunningPriority=runningPrio[c];
+                coreRunningMinPriorityThread=c;
+            }
+        }
+        // This is a loop in a loop with the same variable to continue from
+        // where we left, but we'll never go back to the outer loop
+        for(;prio>minRunningPriority;prio--)
+        {
+            if(readyThreads[prio].empty()) continue;
+            IRQinvokeSchedulerOnCore(coreRunningMinPriorityThread);
+            break;
+        }
+        #endif //WITH_THREAD_AFFINITY
+        #endif //WITH_SMP
+        return;
+    }
+    #if defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
+    // Only if thread affinity support is enabled we may end up in the situation
+    // where we are about to schedule the idle thread on one core and at the
+    // same time we need to call the scheduler on another core
+    if(scheduleOnOtherCore>=0) IRQinvokeSchedulerOnCore(scheduleOnOtherCore);
+    #endif //defined(WITH_THREAD_AFFINITY) && defined(WITH_SMP)
     //No thread found, run the idle thread
-    runningThread=idle;
-    ctxsave=idle->ctxsave;
+    runningThreads[coreId]=idle[coreId];
+    ctxsave[coreId]=idle[coreId]->ctxsave;
     #ifdef WITH_PROCESSES
     MPUConfiguration::IRQdisable();
     #endif //WITH_PROCESSES
     #ifndef WITH_CPU_TIME_COUNTER
-    IRQsetNextPreemption(true);
+    Scheduler::IRQcomputePreemption(coreId,0);
     #else //WITH_CPU_TIME_COUNTER
-    auto t=IRQsetNextPreemption(true);
-    IRQprofileContextSwitch(prev->timeCounterData,idle->timeCounterData,t);
+    auto now=Scheduler::IRQcomputePreemption(coreId,0);
+    CPUTimeCounter::IRQprofileContextSwitch(prev,idle[coreId],now,coreId);
     #endif //WITH_CPU_TIME_COUNTER
 }
 
-Thread *PriorityScheduler::threadList[PRIORITY_MAX]={nullptr};
-Thread *PriorityScheduler::idle=nullptr;
+IntrusiveList<Thread> PriorityScheduler::readyThreads[NUM_PRIORITIES];
+IntrusiveList<Thread> PriorityScheduler::notReadyThreads;
+Thread *PriorityScheduler::idle[CPU_NUM_CORES]={nullptr};
+
+#ifdef OS_TIMER_MODEL_UNIFIED
+template<typename T>
+long long basic_scheduler<T>::nextPreemptionWakeupCore=numeric_limits<long long>::max();
+#endif //OS_TIMER_MODEL_UNIFIED
 
 } //namespace miosix
 

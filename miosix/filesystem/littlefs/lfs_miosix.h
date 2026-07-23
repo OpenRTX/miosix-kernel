@@ -27,7 +27,7 @@
 
 #pragma once
 
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 #include "filesystem/file.h"
 #include "filesystem/stringpart.h"
 #include "kernel/sync.h"
@@ -43,10 +43,10 @@ class LittleFSDirectory;
 struct lfs_driver_context
 {
 public:
-    lfs_driver_context(FileBase *disk) : disk(disk), mutex(Mutex::DEFAULT) {}
+    lfs_driver_context(FileBase *disk) : disk(disk), mutex(MutexOptions::DEFAULT) {}
 
     FileBase *disk;
-    Mutex mutex;
+    KernelMutex mutex;
 };
 
 /**
@@ -164,7 +164,7 @@ private:
     struct lfs_config config;
 
     lfs_t lfs;
-    lfs_file_t file;
+    // lfs_file_t file;
 
     lfs_driver_context context;
 };

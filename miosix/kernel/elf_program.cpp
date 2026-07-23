@@ -29,6 +29,7 @@
 #include "process.h"
 #include "process_pool.h"
 #include "filesystem/file_access.h"
+#include "interfaces/cpu_const.h"
 #include <stdexcept>
 #include <cstring>
 #include <cstdio>
@@ -101,7 +102,7 @@ private:
         int useCount; ///< Used for reference counting the cache entry
     };
 
-    static FastMutex m; ///< Protect programs against concurrent accesses
+    static KernelMutex m; ///< Protect programs against concurrent accesses
     static list<Entry> programs; ///< Cache entries
 };
 
@@ -137,7 +138,7 @@ int ProgramCache::load(const char *name, const unsigned int *& elf,
     //kind of inotify framework to invalidate the cache...
     struct stat s;
     if(file->fstat(&s)) return -EFAULT;
-    Lock<FastMutex> l(m);
+    Lock<KernelMutex> l(m);
     //I know, lookup is O(n), but we need to index the cache by <inode,dev>
     //when loading, and index it by pointer when unloading, while also caring
     //about code size. On top of that, we don't expect many loaded programs
@@ -156,10 +157,7 @@ int ProgramCache::load(const char *name, const unsigned int *& elf,
         return 0;
     }
     //Not found, load program in cache
-    //Seek to the end to get file size, then seek back to the start
-    off_t fileSize=file->lseek(0,SEEK_END);
-    off_t error=file->lseek(0,SEEK_SET);
-    if(fileSize<0 || error!=0) return -EFAULT;
+    off_t fileSize=s.st_size;
     //File sizes can be 64 bit, but executable files can't
     if(fileSize & 0xffffffff00000000ull) return -ENOMEM;
     //Allocate a RAM block in the process pool
@@ -186,7 +184,7 @@ int ProgramCache::load(const char *name, const unsigned int *& elf,
 
 void ProgramCache::unload(const unsigned int *elf)
 {
-    Lock<FastMutex> l(m);
+    Lock<KernelMutex> l(m);
     for(auto it=begin(programs);it!=end(programs);++it)
     {
         if(it->elf!=elf) continue;
@@ -202,7 +200,7 @@ void ProgramCache::unload(const unsigned int *elf)
     DBG("ProgramCache::unload(%p): bug: not in cache\n",elf);
 }
 
-FastMutex ProgramCache::m;
+KernelMutex ProgramCache::m;
 list<ProgramCache::Entry> ProgramCache::programs;
 
 //
@@ -222,7 +220,7 @@ void ElfProgram::validateHeader()
     //Note: this code assumes a little endian elf and a little endian ARM CPU
     if(isUnaligned(getElfBase(),8))
     {
-        DBG("Elf file load address alignment error");
+        DBG("Elf file load address alignment error\n");
         return;
     }
     if(size<sizeof(Elf32_Ehdr)) return;
@@ -230,13 +228,13 @@ void ElfProgram::validateHeader()
     static const char magic[EI_NIDENT]={0x7f,'E','L','F',1,1,1};
     if(memcmp(ehdr->e_ident,magic,EI_NIDENT))
     {
-        DBG("Unrecognized format");
+        DBG("Unrecognized format\n");
         return;
     }
     if(ehdr->e_type!=ET_EXEC) return;
     if(ehdr->e_machine!=EM_ARM)
     {
-        DBG("Wrong CPU arch");
+        DBG("Wrong CPU arch\n");
         return;
     }
     if(ehdr->e_version!=EV_CURRENT) return;
@@ -249,7 +247,7 @@ void ElfProgram::validateHeader()
     #if !defined(__FPU_USED) || __FPU_USED==0
     if(ehdr->e_flags & EF_ARM_VFP_FLOAT)
     {
-        DBG("FPU required");
+        DBG("FPU required\n");
         return;
     }
     #endif
@@ -299,12 +297,12 @@ void ElfProgram::validateHeader()
             case 64:
                 if(isUnaligned(phdr->p_offset,phdr->p_align))
                 {
-                    DBG("Alignment error");
+                    DBG("Alignment error\n");
                     return;
                 }
                 break;
             default:
-                DBG("Unsupported segment alignment");
+                DBG("Unsupported segment alignment\n");
                 return;
         }
         
@@ -315,7 +313,7 @@ void ElfProgram::validateHeader()
                 if(!(phdr->p_flags & PF_R)) return;
                 if((phdr->p_flags & PF_W) && (phdr->p_flags & PF_X))
                 {
-                    DBG("File violates W^X");
+                    DBG("File violates W^X\n");
                     return;
                 }
                 if(phdr->p_flags & PF_X)
@@ -335,7 +333,7 @@ void ElfProgram::validateHeader()
                         MIN_PROCESS_STACK_SIZE;
                     if(phdr->p_memsz>=maxSize)
                     {
-                        DBG("Data segment too big");
+                        DBG("Data segment too big\n");
                         return;
                     }
                     dataSegmentSize=phdr->p_memsz;
@@ -355,6 +353,10 @@ void ElfProgram::validateHeader()
         }
     }
     if(codeSegmentPresent==false) return; //Can't not have code segment
+    // We could support programs without data segment but ProcessImage::load
+    // doesn't handle this case. Since libsyscalls causes a data segment to be
+    // present even with an empty main, we just reject programs with no data
+    if(dataSegmentPresent==false) return;
     // All checks passed setting error code to 0
     ec=0;
 }
@@ -390,7 +392,7 @@ bool ElfProgram::validateDynamicSegment(const Elf32_Phdr *dynamic,
             case DT_MX_ABI:
                 if(dyn->d_un.d_val==DV_MX_ABI_V1) miosixTagFound=true;
                 else {
-                    DBG("Unknown/unsupported DT_MX_ABI");
+                    DBG("Unknown/unsupported DT_MX_ABI\n");
                     return false;
                 }
                 break;
@@ -403,7 +405,7 @@ bool ElfProgram::validateDynamicSegment(const Elf32_Phdr *dynamic,
             case DT_RELA:
             case DT_RELASZ:
             case DT_RELAENT:
-                DBG("RELA relocations unsupported");
+                DBG("RELA relocations unsupported\n");
                 return false;
             default:
                 //Ignore other entries
@@ -412,17 +414,17 @@ bool ElfProgram::validateDynamicSegment(const Elf32_Phdr *dynamic,
     }
     if(miosixTagFound==false)
     {
-        DBG("Not a Miosix executable");
+        DBG("Not a Miosix executable\n");
         return false;
     }
     if(stackSize<MIN_PROCESS_STACK_SIZE)
     {
-        DBG("Requested stack is too small");
+        DBG("Requested stack is too small\n");
         return false;
     }
     if(ramSize>MAX_PROCESS_IMAGE_SIZE)
     {
-        DBG("Requested image size is too large");
+        DBG("Requested image size is too large\n");
         return false;
     }
     //NOTE: this check can only guarantee that statically data and stack fit
@@ -436,7 +438,7 @@ bool ElfProgram::validateDynamicSegment(const Elf32_Phdr *dynamic,
        (dataSegmentSize>MAX_PROCESS_IMAGE_SIZE) ||
        (dataSegmentSize+stackSize+WATERMARK_LEN>ramSize))
     {
-        DBG("Invalid stack or RAM size");
+        DBG("Invalid stack or RAM size\n");
         return false;
     }
     
@@ -453,7 +455,8 @@ bool ElfProgram::validateDynamicSegment(const Elf32_Phdr *dynamic,
         const int relSize=dtRelsz/sizeof(Elf32_Rel);
         for(int i=0;i<relSize;i++,rel++)
         {
-            switch(ELF32_R_TYPE(rel->r_info))
+            unsigned int relType=ELF32_R_TYPE(rel->r_info);
+            switch(relType)
             {
                 case R_ARM_NONE:
                     break;
@@ -463,7 +466,7 @@ bool ElfProgram::validateDynamicSegment(const Elf32_Phdr *dynamic,
                     if(rel->r_offset & 0x3) return false;
                     break;
                 default:
-                    DBG("Unexpected relocation type");
+                    DBG("Unexpected relocation %d type %d\n", i, relType);
                     return false;
             }
         }
@@ -534,6 +537,7 @@ void ProcessImage::load(const ElfProgram& program)
                         case DT_MX_RAMSIZE:
                             tie(image,size)=ProcessPool::instance()
                                     .allocate(dyn->d_un.d_val);
+                            break;
                         case DT_MX_STACKSIZE:
                             mainStackSize=dyn->d_un.d_val;
                             break;

@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2010, 2011 by Terraneo Federico                         *
+ *   Copyright (C) 2010-2025 by Terraneo Federico                          *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -27,10 +27,11 @@
 
 #pragma once
 
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
+#include "interfaces/cpu_const.h"
 #include "edf_scheduler_types.h"
-#include "kernel/kernel.h"
-#include <list>
+#include "kernel/thread.h"
+#include "kernel/sched_data_structures.h"
 
 #ifdef SCHED_TYPE_EDF
 
@@ -49,29 +50,33 @@ public:
      * This is called when a thread is created.
      * \param thread a pointer to a valid thread instance.
      * The behaviour is undefined if a thread is added multiple timed to the
-     * scheduler, or if thread is NULL.
+     * scheduler, or if thread is nullptr.
      * \param priority the priority of the new thread.
      * Priority must be a positive value.
      * Note that the meaning of priority is scheduler specific.
+     * \return false if an error occurred and the thread could not be added to
+     * the scheduler
+     *
+     * Note: this member function is called also before the kernel is started
+     * to add the main and idle thread.
      */
-    static bool PKaddThread(Thread *thread, EDFSchedulerPriority priority);
+    static bool IRQaddThread(Thread *thread, EDFSchedulerPriority priority);
 
     /**
+     * \internal
      * \return true if thread exists, false if does not exist or has been
      * deleted. A joinable thread is considered existing until it has been
      * joined, even if it returns from its entry point (unless it is detached
      * and terminates).
-     *
-     * Can be called both with the kernel paused and with interrupts disabled.
      */
-    static bool PKexists(Thread *thread);
+    static bool IRQexists(Thread *thread);
 
     /**
      * \internal
      * Called when there is at least one dead thread to be removed from the
      * scheduler
      */
-    static void PKremoveDeadThreads();
+    static void removeDeadThreads();
 
     /**
      * \internal
@@ -81,7 +86,7 @@ public:
      * \param newPriority new thread priority.
      * Priority must be a positive value.
      */
-    static void PKsetPriority(Thread *thread, EDFSchedulerPriority newPriority);
+    static void IRQsetPriority(Thread *thread, EDFSchedulerPriority newPriority);
 
     /**
      * \internal
@@ -98,11 +103,15 @@ public:
 
     /**
      * \internal
-     * This is called before the kernel is started to by the kernel. The given
+     * This is called before the kernel is started by the kernel. The given
      * thread is the idle thread, to be run all the times where no other thread
      * can run.
+     * \param whichCore either 0 on single core platforms, or specify for which
+     * core this idle thread is meant to be used. Note that it is expected that
+     * during boot exactly one idle thread for each core is given to the
+     * scheduler
      */
-    static void IRQsetIdleThread(Thread *idleThread);
+    static void IRQsetIdleThread(int whichCore, Thread *idleThread);
 
     /**
      * \internal
@@ -110,43 +119,49 @@ public:
      * its running status. For example when a thread become sleeping, waiting,
      * deleted or if it exits the sleeping or waiting status
      */
-    static void IRQwaitStatusHook(Thread *t) {}
-
-    /**
-     * This function is used to develop interrupt driven peripheral drivers.<br>
-     * Can be used ONLY inside an IRQ (and not when interrupts are disabled) to
-     * find next thread in READY status. If the kernel is paused, does nothing.
-     * Can be used for example if an IRQ causes a higher priority thread to be
-     * woken, to change context. Note that to use this function the IRQ must
-     * use the macros to save/restore context defined in portability.h
-     *
-     * If the kernel is paused does nothing.
-     * It's behaviour is to modify the global variable miosix::cur which always
-     * points to the currently running thread.
-     */
-    static void IRQfindNextThread();
+    static void IRQwaitStatusHook(Thread *thread) {}
 
     /**
      * \internal
-     * \return the next scheduled preemption set by the scheduler
-     * In case no preemption is set returns numeric_limits<long long>::max()
+     * Called when a thread transitions from waiting/sleeping to ready.
+     * Must not be called if the thread is already ready.
      */
-    static long long IRQgetNextPreemption();
+    static void IRQwokenThread(Thread* thread);
+
+    /**
+     * \internal
+     * This function is used only by the kernel code to run the scheduler.
+     * It finds the next thread in READY status. If the kernel is paused,
+     * does nothing. It's behaviour is to modify the global variable
+     * miosix::runningThread which always points to the currently running thread.
+     */
+    static void IRQrunScheduler();
     
 private:
     /**
-     * Add a thread to the list of threads, keeping the list ordered by deadline
-     * \param thread thread to add
+     * Functor needed by TimeSortedQueue to insert the thread in the correct
+     * place in the waiting list based on its deadline
      */
-    static void add(Thread *thread);
+    struct GetTime
+    {
+        long long operator()(Thread *thread)
+        {
+            return thread->schedData.deadline.get();
+        }
+    };
 
-    /**
-     * Remove a thread to the list of threads.
-     * \param thread thread to remove
-     */
-    static void remove(Thread *thread);
+    ///\internal Deadline-sorted queue of ready threads with deadline (EDF-scheduled)
+    static TimeSortedQueue<Thread,EDFScheduler::GetTime> readyEdfThreads;
 
-    static Thread *head;///<\internal Head of threads list, ordered by deadline
+    ///\internal FIFO queue of ready threads without deadline (RR scheduled)
+    static FifoQueue<Thread> readyRrThreads;
+
+    ///\internal List of threads that are not ready.
+    ///Keep the invariant that deleted threads are pushed to the back!
+    static IntrusiveList<Thread> notReadyThreads;
+
+    ///\internal idle threads (one per core)
+    static Thread *idle[CPU_NUM_CORES];
 };
 
 } //namespace miosix

@@ -36,7 +36,7 @@
  * \file gpio.h
  * The interface to gpios provided by Miosix is in the form of templates,
  * therefore this file can only include gpio_impl.h with the architecture
- * dependand code.
+ * dependant code.
  *
  * The interface should be as follows:
  * First a class Mode containing an enum Mode_ needs to be defined. Its minimum
@@ -100,15 +100,15 @@
  * The intended use is this:
  * considering an architecture with two ports, PORTA and PORTB each with 8 pins.
  * The header gpio_impl.h should provide two constants, for example named
- * GPIOA_BASE and GPIOB_BASE.
+ * PA and PB.
  *
  * The user can declare the hardware mapping between gpios and what is connected
  * to them, usually in an header file. If for example PORTA.0 is connected to
  * a button while PORTB.4 to a led, the header file might contain:
  *
  * \code
- * typedef Gpio<GPIOA_BASE,0> button;
- * typedef Gpio<GPIOB_BASE,4> led;
+ * typedef Gpio<PA,0> button;
+ * typedef Gpio<PB,4> led;
  * \endcode
  *
  * This allows the rest of the code to be written in terms of leds and buttons,
@@ -134,8 +134,48 @@
  *
  */
 
+#include "interfaces-impl/gpio_impl.h"
+
+namespace miosix {
+
+/**
+ * Invalid GPIO pin which does nothing. Cannot be read, and its port and number
+ * are not available.
+ */
+class NullGpio
+{
+public:
+    /**
+     * \return whether the Gpio is valid
+     */
+    bool isValid() const { return false; }
+    
+    /**
+     * Set the GPIO to the desired mode (INPUT, OUTPUT, ...)
+     * \param m enum Mode_
+     */
+    static void mode(Mode m) { }
+
+    /**
+     * Set the pin to 1, if it is an output
+     */
+    static void high() {  }
+
+    /**
+     * Set the pin to 0, if it is an output
+     */
+    static void low() { }
+
+    /**
+     * \return this Gpio converted as a GpioPin class 
+     */
+    static GpioPin getPin() { return GpioPin(); }
+
+    NullGpio() = delete; //Only static member functions
+};
+
+} // namespace miosix
+
 /**
  * \}
  */
-
-#include "interfaces-impl/gpio_impl.h"

@@ -25,8 +25,7 @@
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  ***************************************************************************/
 
-#ifndef SOFTWARE_SPI_H
-#define	SOFTWARE_SPI_H
+#pragma once
 
 #include "interfaces/gpio.h"
 
@@ -155,9 +154,7 @@ unsigned int SoftwareSPI<SI,SO,SCK,CE,numNops>::
 template<typename SI, typename SO, typename SCK, typename CE, unsigned numNops>
 void SoftwareSPI<SI,SO,SCK,CE,numNops>::delayLoop()
 {
-    for(int j=0;j<numNops;j++) asm volatile("nop");    
+    for(unsigned int j=0;j<numNops;j++) asm volatile("nop");
 }
 
 } //namespace miosix
-
-#endif  //SOFTWARE_SPI_H

@@ -32,9 +32,11 @@
 #include <cstdio>
 #include <malloc.h>
 #include "util.h"
-#include "kernel/kernel.h"
-#include "stdlib_integration/libc_integration.h"
-#include "config/miosix_settings.h" //For WATERMARK_FILL and STACK_FILL
+#include "kernel/lock.h"
+#include "kernel/thread.h"
+#include "kercalls/libc_integration.h"
+#include "miosix_settings.h" //For WATERMARK_FILL and STACK_FILL
+#include "interfaces/cpu_const.h"
 
 using namespace std;
 
@@ -93,7 +95,15 @@ unsigned int MemoryProfiling::getAbsoluteFreeStack()
 
 unsigned int MemoryProfiling::getCurrentFreeStack()
 {
-    register int *stack_ptr asm("sp");
+    #ifdef __ARM_EABI__
+    void *stack_ptr;
+    asm volatile("mov %0, sp" : "=r"(stack_ptr));
+    #else //__ARM_EABI__
+    //NOTE: __builtin_frame_address doesn't add the size of the current function
+    //frame, likely __builtin_stack_address would be better but GCC 9.2.0 does
+    //not have it
+    void *stack_ptr=__builtin_frame_address(0);
+    #endif //__ARM_EABI__
     const unsigned int *walk=Thread::getStackBottom();
     unsigned int freeStack=(reinterpret_cast<unsigned int>(stack_ptr)
                           - reinterpret_cast<unsigned int>(walk));
@@ -131,22 +141,43 @@ unsigned int MemoryProfiling::getCurrentFreeHeap()
     return getHeapSize()-mallocData.uordblks;
 }
 
+char *formatHex(char *out, unsigned long n, unsigned int len)
+{
+    unsigned int i=len;
+    while(i--)
+    {
+        unsigned long digit=n&0xF; n>>=4;
+        if(digit<10) out[i]=digit+'0';
+        else out[i]=(digit-10)+'a';
+    }
+    return out+len;
+}
+
 /**
  * \internal
  * used by memDump
  */
 static void memPrint(const char *data, char len)
 {
-    iprintf("0x%08x | ",reinterpret_cast<unsigned int>(data));
-    for(int i=0;i<len;i++) iprintf("%02x ",data[i]);
-    for(int i=0;i<(16-len);i++) iprintf("   ");
-    iprintf("| ");
+    char buffer[79+1];
+    char *p=buffer;
+    *p++='0'; *p++='x';
+    p=formatHex(p,reinterpret_cast<unsigned int>(data),8);
+    *p++=' ';
     for(int i=0;i<len;i++)
     {
-        if((data[i]>=32)&&(data[i]<127)) iprintf("%c",data[i]);
-        else iprintf(".");
+        p=formatHex(p,static_cast<unsigned char>(data[i]),2);
+        *p++=' ';
     }
-    iprintf("\n");
+    for(int i=0;i<(16-len)*3;i++) *p++=' ';
+    *p++='|'; *p++=' ';
+    for(int i=0;i<len;i++)
+    {
+        if((data[i]>=32)&&(data[i]<127)) *p++=data[i];
+        else *p++='.';
+    }
+    *p++='\0';
+    puts(buffer);
 }
 
 void memDump(const void *start, int len)
@@ -163,22 +194,59 @@ void memDump(const void *start, int len)
 
 #ifdef WITH_CPU_TIME_COUNTER
 
-static void printSingleThreadInfo(Thread *self, Thread *thread,
-    int approxDt, long long newTime, long long oldTime, bool isIdleThread,
-    bool isNewThread)
+static long long printSingleThreadInfo(long long approxDt,
+    CPUTimeCounter::Data *oldData, CPUTimeCounter::Data *newData,
+    long long allThdDelta[CPU_NUM_CORES])
 {
-    long long threadDt = newTime - oldTime;
-    int perc = static_cast<int>(threadDt >> 16) * 100 / approxDt;
-    iprintf("%p %10lld ns (%2d.%1d%%)", thread, threadDt, perc / 10, perc % 10);
-    if(isIdleThread)
+    if(!newData)
     {
-        iprintf(" (idle)");
-        isIdleThread = false;
-    } else if(thread == self) {
-        iprintf(" (cur)");
+        iprintf("%p killed\n", oldData->thread);
+        return 0;
+    } else {
+        Thread *thread=newData->thread;
+        int perc[CPU_NUM_CORES];
+        long long allCpuDelta=0;
+        if(oldData)
+        {
+            bool revived=false;
+            for(unsigned char i=0;i<CPU_NUM_CORES;i++)
+            {
+                long long td;
+                if(newData->usedCpuTime[i]>=oldData->usedCpuTime[i])
+                {
+                    td=newData->usedCpuTime[i]-oldData->usedCpuTime[i];
+                } else {
+                    // CPU time is incrementing. If it doesn't, a thread was
+                    // killed, and then another one created immediately after,
+                    // and the two thread pointers are coincidentially the same.
+                    // This is rare but not impossible!
+                    td=newData->usedCpuTime[i];
+                    revived=true;
+                }
+                allThdDelta[i]+=td;
+                perc[i]=static_cast<int>(td>>16)*100/approxDt;
+                allCpuDelta+=td;
+            }
+            if(revived) iprintf("%p killed\n", oldData->thread);
+        } else {
+            for(unsigned char i=0;i<CPU_NUM_CORES;i++)
+            {
+                long long td=newData->usedCpuTime[i];
+                allThdDelta[i]+=td;
+                perc[i]=static_cast<int>(td>>16)*100/approxDt;
+                allCpuDelta+=td;
+            }
+        }
+        iprintf("%p %c %10lld %2d.%1d%%",thread,newData->state,allCpuDelta,
+                                         perc[0]/10,perc[0]%10);
+        for(unsigned char i=1;i<CPU_NUM_CORES;i++)
+        {
+            iprintf(" %2d.%1d%%",perc[i]/10,perc[i]%10);
+        }
+        if(!oldData) iprintf(" new");
+        iprintf("\n");
+        return allCpuDelta;
     }
-    if(isNewThread) iprintf(" new");
-    iprintf("\n");
 }
 
 //
@@ -200,62 +268,76 @@ void CPUProfiler::print()
     std::vector<CPUTimeCounter::Data>& newInfo = newSnap.threadData;
     long long dt = newSnap.time - oldSnap.time;
     int approxDt = static_cast<int>(dt >> 16) / 10;
-    Thread *self = Thread::getCurrentThread();
+    long long allThdDelta[CPU_NUM_CORES]={0};
 
     iprintf("%d threads, last interval %lld ns\n", newInfo.size(), dt);
+    iprintf("%10s S %10s %5s","TID","time [ns]","cpu 0");
+    for(int i=1;i<CPU_NUM_CORES;i++) iprintf(" cpu%2d",i);
+    iprintf("\n");
 
     // Compute the difference between oldInfo and newInfo
     auto oldIt = oldInfo.begin();
     auto newIt = newInfo.begin();
-    // CPUTimeCounter always returns the idle thread as the first thread
-    bool isIdleThread = true;
-    while(newIt != newInfo.end() && oldIt != oldInfo.end())
+    while(newIt!=newInfo.end() && oldIt!=oldInfo.end())
     {
         // Skip old threads that were killed
-        while(newIt->thread != oldIt->thread)
+        while(oldIt!=oldInfo.end() && newIt->thread!=oldIt->thread)
         {
-            iprintf("%p killed\n", oldIt->thread);
+            printSingleThreadInfo(approxDt,&(*oldIt),nullptr,allThdDelta);
             oldIt++;
         }
-        // Found a thread that exists in both lists
-        printSingleThreadInfo(self, newIt->thread, approxDt, newIt->usedCpuTime,
-            oldIt->usedCpuTime, isIdleThread, false);
-        isIdleThread = false;
-        newIt++;
-        oldIt++;
+        if(oldIt!=oldInfo.end())
+        {
+            // Found a thread that exists in both lists
+            printSingleThreadInfo(approxDt,&(*oldIt),&(*newIt),allThdDelta);
+            newIt++;
+            oldIt++;
+        }
     }
     // Skip last killed threads
     while(oldIt != oldInfo.end())
     {
-        iprintf("%p killed\n", oldIt->thread);
-        isIdleThread = false;
+        printSingleThreadInfo(approxDt,&(*oldIt),nullptr,allThdDelta);
         oldIt++;
     }
     // Print info about newly created threads
     while(newIt != newInfo.end())
     {
-        printSingleThreadInfo(self, newIt->thread, approxDt, newIt->usedCpuTime,
-            0, isIdleThread, true);
-        isIdleThread = false;
+        printSingleThreadInfo(approxDt,nullptr,&(*newIt),allThdDelta);
         newIt++;
+    }
+    // Print global stats
+    iprintf("%-23s", "Total load");
+    long long allCpuThdDelta=0;
+    for(unsigned char i=0;i<CPU_NUM_CORES;i++)
+    {
+        allCpuThdDelta+=allThdDelta[i];
+        int totalPerc=static_cast<int>(allThdDelta[i]>>16)*100/approxDt;
+        iprintf(" %2d.%1d%%",totalPerc/10,totalPerc%10);
+    }
+    iprintf("\n");
+    if(CPU_NUM_CORES>1)
+    {
+        int totalPerc=static_cast<int>(allCpuThdDelta>>16)*100/approxDt;
+        iprintf("Total load (all cpus) %4d.%1d%%\n",totalPerc/10,totalPerc%10);
     }
 }
 
 void CPUProfiler::Snapshot::collect()
 {
-    // We cannot expand the threadData vector while the kernel is paused.
-    //   Therefore we need to expand the vector earlier, pause the kernel, and
+    // We cannot expand the threadData vector while the GIL is taken.
+    //   Therefore we need to expand the vector earlier, lock the GIL, and
     // then check if the number of threads stayed the same. If it didn't,
-    // we must unpause the kernel and try again. Otherwise we can fill the
+    // we must unlock the GIL and try again. Otherwise we can fill the
     // vector.
     bool success = false;
     do {
         // Resize the vector with the current number of threads
         unsigned int nThreads = CPUTimeCounter::getThreadCount();
-        threadData.resize(nThreads);
+        this->threadData.resize(nThreads);
         {
-            // Pause the kernel!
-            PauseKernelLock pLock;
+            // Pause scheduling on all cores!
+            FastGlobalIrqLock pLock;
 
             // If the number of threads changed, try again
             unsigned int nThreads2 = CPUTimeCounter::getThreadCount();
@@ -268,13 +350,11 @@ void CPUProfiler::Snapshot::collect()
             // respect to the data collected, at the cost of making the
             // update interval imprecise (if this timestamp is then used
             // to mantain the update interval)
-            time = getTime();
+            this->time = IRQgetTime();
             // Fetch the CPU time data for all threads
-            auto i1 = threadData.begin();
-            auto i2 = CPUTimeCounter::PKbegin();
-            do
-                *i1++ = *i2++;
-            while(i2 != CPUTimeCounter::PKend());
+            auto i1 = this->threadData.begin();
+            auto i2 = CPUTimeCounter::IRQbegin(this->time);
+            do *i1++ = *i2++; while(i2 != CPUTimeCounter::IRQend());
         }
     } while(!success);
 }

@@ -27,7 +27,7 @@
 
 #pragma once
 
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 #include <limits>
 
 #ifdef SCHED_TYPE_EDF
@@ -53,7 +53,7 @@ public:
     /**
      * Default constructor.
      */
-    EDFSchedulerPriority() : deadline(MAIN_PRIORITY) {}
+    EDFSchedulerPriority() : deadline(DEFAULT_PRIORITY) {}
 
     /**
      * \return the priority value

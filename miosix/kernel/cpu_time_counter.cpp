@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2023 by Daniele Cattaneo                                *
+ *   Copyright (C) 2023,2025 by Daniele Cattaneo                           *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -26,46 +26,56 @@
  ***************************************************************************/
 
 #include "cpu_time_counter.h"
-#include "kernel/kernel.h"
+#include "kernel/thread.h"
+#include "interfaces/cpu_const.h"
 
 #ifdef WITH_CPU_TIME_COUNTER
 
-using namespace miosix;
+namespace miosix {
+
+// Defined in thread.cpp, used to check if a thread is running
+extern volatile Thread *runningThreads[CPU_NUM_CORES];
 
 Thread *CPUTimeCounter::head = nullptr;
 Thread *CPUTimeCounter::tail = nullptr;
-volatile unsigned int CPUTimeCounter::nThreads = 0;
+unsigned int CPUTimeCounter::nThreads = 0;
 
-long long CPUTimeCounter::getActiveThreadTime()
+void CPUTimeCounter::iterator::IRQgetReadyThreadData(CPUTimeCounter::Data& res)
 {
-    long long curTime, usedTime, lastAct;
+    res.state=CPUTimeCounter::Data::READY;
+    for(unsigned char i=0; i<CPU_NUM_CORES; i++)
     {
-        PauseKernelLock pk;
-        curTime = IRQgetTime();
-        auto cur = Thread::PKgetCurrentThread();
-        usedTime = cur->timeCounterData.usedCpuTime;
-        lastAct = cur->timeCounterData.lastActivation;
+        if(runningThreads[i]==res.thread)
+        {
+            long long usedTime = cur->timeCounterData.usedCpuTime[i];
+            long long lastAct = cur->timeCounterData.lastActivation;
+            res.usedCpuTime[i] = usedTime+(this->time-lastAct);
+            res.state=CPUTimeCounter::Data::RUNNING;
+        } else {
+            res.usedCpuTime[i] = cur->timeCounterData.usedCpuTime[i];
+        }
     }
-    return usedTime + (curTime - lastAct);
 }
 
-void CPUTimeCounter::PKremoveDeadThreads()
+void CPUTimeCounter::removeDeadThreads()
 {
-    Thread *prev = nullptr;
-    Thread *cur = head;
+    Thread *prev=nullptr;
+    Thread *cur=head;
     while(cur)
     {
         if(cur->flags.isDeleted())
         {
-            if(prev) prev->timeCounterData.next = cur->timeCounterData.next;
-            else head = cur->timeCounterData.next;
+            if(prev) prev->timeCounterData.next=cur->timeCounterData.next;
+            else head=cur->timeCounterData.next;
             nThreads--;
         } else {
-            prev = cur;
+            prev=cur;
         }
-        cur = cur->timeCounterData.next;
+        cur=cur->timeCounterData.next;
     }
-    tail = prev;
+    tail=prev;
 }
+
+} // namespace miosix
 
 #endif // WITH_CPU_TIME_COUNTER

@@ -29,7 +29,7 @@
 
 #include "filesystem/file.h"
 #include "kernel/sync.h"
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 
 #ifdef WITH_FILESYSTEM
 
@@ -117,7 +117,7 @@ private:
 
     static const int defaultSize=256;
     static const int pollTime=100000000; //100ms
-    FastMutex m;
+    KernelMutex m;
     ConditionVariable cv;
     int put, get, size, capacity;
     char *buffer;

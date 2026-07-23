@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2008-2023 by Terraneo Federico                          *
+ *   Copyright (C) 2008-2025 by Terraneo Federico                          *
  *   Copyright (C) 2023 by Daniele Cattaneo                                *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
@@ -28,10 +28,10 @@
 
 #pragma once
 
-#include "kernel.h"
-#include "kernel/scheduler/scheduler.h"
+#include "lock.h"
 #include "intrusive.h"
-#include <vector>
+#include "kernel/scheduler/sched_types.h"
+#include "kernel/sched_data_structures.h"
 
 namespace miosix {
 
@@ -40,6 +40,21 @@ namespace miosix {
  * \{
  */
 
+//Forwrd declaration
+class Thread;
+class ConditionVariable;
+class FastPauseKernelLock;
+enum class TimedWaitResult;
+
+/**
+ * Mutex options, passed to the constructor to set additional options.
+ */
+enum MutexOptions
+{
+    DEFAULT,    ///< Default non-recursive mutex
+    RECURSIVE   ///< Mutex is recursive
+};
+
 /**
  * Fast mutex without support for priority inheritance
  */
@@ -47,28 +62,18 @@ class FastMutex
 {
 public:
     /**
-     * Mutex options, passed to the constructor to set additional options.<br>
-     * The DEFAULT option indicates the default Mutex type.
-     */
-    enum Options
-    {
-        DEFAULT,    ///< Default mutex
-        RECURSIVE   ///< Mutex is recursive
-    };
-
-    /**
      * Constructor, initializes the mutex.
      */
-    FastMutex(Options opt=DEFAULT);
+    FastMutex(MutexOptions opt=MutexOptions::DEFAULT) : owner(nullptr),
+        recursiveDepth(opt==MutexOptions::RECURSIVE ? 0 : -1) {}
 
     /**
      * Locks the critical section. If the critical section is already locked,
      * the thread will be queued in a wait list.
+     * \return always returns 0, to allow tail call optimization when used to
+     * implement pthread_mutex_t
      */
-    void lock()
-    {
-        pthread_mutex_lock(&impl);
-    }
+    int lock();
 
     /**
      * Acquires the lock only if the critical section is not already locked by
@@ -76,45 +81,65 @@ public:
      * the mutex' lock count will not be incremented.
      * \return true if the lock was acquired
      */
-    bool tryLock()
-    {
-        return pthread_mutex_trylock(&impl)==0;
-    }
+    bool tryLock();
 
     /**
      * Unlocks the critical section.
+     * \return always returns 0, to allow tail call optimization when used to
+     * implement pthread_mutex_t
      */
-    void unlock()
-    {
-        pthread_mutex_unlock(&impl);
-    }
+    int unlock();
 
     /**
      * \internal
-     * \return the FastMutex implementation defined mutex type
+     * \return true if mutex is locked
      */
-    pthread_mutex_t *get()
-    {
-        return &impl;
-    }
+    bool isLocked() const { return owner!=nullptr; }
 
-    /**
-     * Destructor
-     */
-    ~FastMutex()
-    {
-        pthread_mutex_destroy(&impl);
-    }
-
+    //Unwanted methods
     FastMutex(const FastMutex&) = delete;
     FastMutex& operator= (const FastMutex&) = delete;
 
 private:
-    pthread_mutex_t impl;
-};
+    /**
+     * Implementation code to lock a mutex to a specified depth level.
+     * Must be called with the kernel paused. If the mutex is not recursive the
+     * mutex is locked only one level deep regardless of the depth value.
+     * \param dLock The instance of FastPauseKernelLock
+     * \param depth recursive depth at which the mutex will be locked. Zero
+     * means the mutex is locked one level deep (as if lock() was called once),
+     * one means two levels deep, etc.
+     */
+    inline void PKlockToDepth(FastPauseKernelLock& dLock, unsigned int depth);
 
-//Forward declaration
-class ConditionVariable;
+    /**
+     * Implementation code to unlock all depth levels of a mutex.
+     * Must be called with the kernel paused
+     * \param mutex mutex to unlock
+     * \return the mutex recursive depth (how many times it was locked by the
+     * owner). Zero means the mutex is locked one level deep (lock() was called
+     * once), one means two levels deep, etc.
+     */
+    inline unsigned int PKunlockAllDepthLevels();
+
+    /// Thread currently inside critical section, if nullptr the critical section
+    /// is free
+    Thread *owner;
+
+    /// Used to hold nesting depth for recursive mutexes, -1 if not recursive
+    int recursiveDepth;
+
+    /// Holds waiting threads, handles prioritization
+    /// A note for the curious: switching policy to ConsiderInheritedPriority
+    /// won't work and will likely crash. To be part of the priority inheritance
+    /// algorithm a synchronization primitive needs to be involved in the locked
+    /// list and class FastMutex doesn't. If you want a mutex with priority
+    /// inheritance just use class Mutex
+    WaitQueue<PriorityPolicy::IgnoreInheritedPriority> waitQueue;
+
+    //Friends
+    friend class ConditionVariable;
+};
 
 /**
  * A mutex class with support for priority inheritance. If a thread tries to
@@ -131,61 +156,39 @@ class Mutex
 {
 public:
     /**
-     * Mutex options, passed to the constructor to set additional options.<br>
-     * The DEFAULT option indicates the default Mutex type.
-     */
-    enum Options
-    {
-        DEFAULT,    ///< Default mutex
-        RECURSIVE   ///< Mutex is recursive
-    };
-
-    /**
      * Constructor, initializes the mutex.
      */
-    Mutex(Options opt=DEFAULT);
+    Mutex(MutexOptions opt=MutexOptions::DEFAULT) : owner(nullptr),
+        recursiveDepth(opt==MutexOptions::RECURSIVE ? 0 : -1), next(nullptr) {}
 
     /**
      * Locks the critical section. If the critical section is already locked,
      * the thread will be queued in a wait list.
+     * \return always returns 0, to allow tail call optimization when used to
+     * implement pthread_mutex_t
      */
-    void lock()
-    {
-        PauseKernelLock dLock;
-        PKlock(dLock);
-    }
-	
+    int lock();
+
     /**
      * Acquires the lock only if the critical section is not already locked by
      * other threads. Attempting to lock again a recursive mutex will fail, and
      * the mutex' lock count will not be incremented.
      * \return true if the lock was acquired
      */
-    bool tryLock()
-    {
-        PauseKernelLock dLock;
-        return PKtryLock(dLock);
-    }
-    
+    bool tryLock();
+
     /**
      * Unlocks the critical section.
+     * \return always returns 0, to allow tail call optimization when used to
+     * implement pthread_mutex_t
      */
-    void unlock()
-    {
-        #ifdef SCHED_TYPE_EDF
-        bool hppw;
-        {
-            PauseKernelLock dLock;
-            hppw=PKunlock(dLock);
-        }
-        if(hppw) Thread::yield();//The other thread might have a closer deadline
-        #else
-        {
-            PauseKernelLock dLock;
-            PKunlock(dLock);
-        }
-        #endif //SCHED_TYPE_EDF
-    }
+    int unlock();
+
+    /**
+     * \internal
+     * \return true if mutex is locked
+     */
+    bool isLocked() const { return owner!=nullptr; }
 
     //Unwanted methods
     Mutex(const Mutex& s) = delete;
@@ -193,75 +196,106 @@ public:
 
 private:
     /**
-     * Lock mutex, can be called only with kernel paused one level deep
-     * (pauseKernel calls can be nested). If another thread holds the mutex,
-     * this call will restart the kernel and wait (that's why the kernel must
-     * be paused one level deep).<br>
-     * \param dLock the PauseKernelLock instance that paused the kernel.
-     */
-    void PKlock(PauseKernelLock& dLock);
-    
-    /**
      * Lock mutex to a given depth, can be called only with kernel paused one
      * level deep (pauseKernel calls can be nested). If another thread holds the
      * mutex, this call will restart the kernel and wait (that's why the kernel
      * must be paused one level deep).<br>
      * If the mutex is not recursive the mutex is locked only one level deep
      * regardless of the depth value.
-     * \param dLock the PauseKernelLock instance that paused the kernel.
+     * \param dLock the FastPauseKernelLock instance that paused the kernel.
      * \param depth recursive depth at which the mutex will be locked. Zero
      * means the mutex is locked one level deep (as if lock() was called once),
      * one means two levels deep, etc. 
      */
-    void PKlockToDepth(PauseKernelLock& dLock, unsigned int depth);
-
-    /**
-     * Acquires the lock only if the critical section is not already locked by
-     * other threads. Attempting to lock again a recursive mutex will fail, and
-     * the mutex' lock count will not be incremented.<br>
-     * Can be called only with kernel paused one level deep.
-     * (pauseKernel calls can be nested).
-     * \param dLock the PauseKernelLock instance that paused the kernel.
-     * \return true if the lock was acquired
-     */
-    bool PKtryLock(PauseKernelLock& dLock);
-
-    /**
-     * Unlock mutex, can be called only with kernel paused one level deep
-     * (pauseKernel calls can be nested).<br>
-     * \param dLock the PauseKernelLock instance that paused the kernel.
-     * \return true if a higher priority thread was woken
-     */
-    bool PKunlock(PauseKernelLock& dLock);
+    void PKlockToDepth(FastPauseKernelLock& dLock, unsigned int depth);
     
     /**
      * Unlock all levels of a recursive mutex, can be called only with
      * kernel paused one level deep (pauseKernel calls can be nested).<br>
-     * \param dLock the PauseKernelLock instance that paused the kernel.
      * \return the mutex recursive depth (how many times it was locked by the
      * owner). Zero means the mutex is locked one level deep (lock() was called
      * once), one means two levels deep, etc. 
      */
-    unsigned int PKunlockAllDepthLevels(PauseKernelLock& dLock);
+    unsigned int PKunlockAllDepthLevels();
 
-    /// Thread currently inside critical section, if NULL the critical section
+    /**
+     * First part of unlocking a mutex. Remove the mutex from the owner's list
+     * of locked mutexes and reduce priority if the current priority was due to
+     * having locked this mutex
+     */
+    inline void deInheritPriority();
+
+    /**
+     * Second part of unlocking a mutex. Switch the current mutex owner with
+     * the highest priority waiting thread, or leave the mutex without owner
+     * if there are no more waiting threads
+     */
+    inline void chooseNextOwner();
+
+    /**
+     * Inherit the given priority towards the thread that is the owner of the
+     * locked mutex we're about to lock. Additionally, recursively check if the
+     * mutex owner is locked on another mutex and propagate the inheritance
+     * as needed
+     * \param prio priority to propagate
+     */
+    void inheritPriorityTowardsMutexOwner(Priority prio);
+
+    /**
+     * \param t a thread
+     * \return true if the thread's list of locked mutexes with priority
+     * inheritance is empty
+     */
+    static inline bool lockedListEmpty(Thread *t);
+
+    /**
+     * Add this mutex to the list of locked mutex with priority inheritance
+     * \param t thread to which the current mutex will be added
+     */
+    inline void addToLockedList(Thread *t);
+
+    /**
+     * Remove this mutex from the list of locked mutex with priority inheritance
+     * \param t thread from which the current mutex will be removed
+     */
+    inline void removeFromLockedList(Thread *t);
+
+    /**
+     * Check the list of all mutexes with priority inheritance a thread is
+     * locking and update the given priority to be the maximum between the
+     * initial value and the one of the highest priority thread waiting on
+     * said mutexes
+     * \param t thread whose list of locked mutex with priority inheritance
+     * needs to be checked
+     * \param pr initial priority to boost with priority inheritance
+     * \return the boosted priority
+     */
+    static Priority inheritPriorityFromLockedList(Thread *t, Priority pr);
+
+    /// Thread currently inside critical section, if nullptr the critical section
     /// is free
     Thread *owner;
+
+    /// Used to hold nesting depth for recursive mutexes, -1 if not recursive
+    int recursiveDepth;
+
+    /// Holds waiting threads, handles prioritization
+    WaitQueue<PriorityPolicy::ConsiderInheritedPriority> waitQueue;
 
     /// If this mutex is locked, it is added to a list of mutexes held by the
     /// thread that owns this mutex. This field is necessary to make the list.
     Mutex *next;
 
-    /// Waiting thread are stored in this min-heap, sorted by priority
-    std::vector<Thread *> waiting;
-
-    /// Used to hold nesting depth for recursive mutexes, -1 if not recursive
-    int recursiveDepth;
-
     //Friends
     friend class ConditionVariable;
     friend class Thread;
 };
+
+#ifdef KERNEL_MUTEX_WITH_PRIORITY_INHERITANCE
+using KernelMutex = Mutex;
+#else //KERNEL_MUTEX_WITH_PRIORITY_INHERITANCE
+using KernelMutex = FastMutex;
+#endif //KERNEL_MUTEX_WITH_PRIORITY_INHERITANCE
 
 /**
  * Very simple RAII style class to lock a mutex in an exception-safe way.
@@ -306,7 +340,11 @@ private:
 
 /**
  * This class allows to temporarily re-unlock a mutex in a scope where
- * it is locked <br>
+ * it is locked
+ *
+ * \warning This class can only unlock a recursive mutex that has been locked
+ * ONE level deep, so be careful when using it.
+ *
  * Example:
  * \code
  * Mutex m;
@@ -372,7 +410,6 @@ public:
     Unlock& operator= (const Unlock& l) = delete;
 
 private:
-
     T& mutex;///< Reference to locked mutex
 };
 
@@ -434,18 +471,7 @@ public:
      * otherwise the behaviour is undefined.
      * \param m a locked FastMutex
      */
-    void wait(FastMutex& m)
-    {
-        wait(m.get());
-    }
-
-    /**
-     * Unlock the pthread_mutex_t and wait.
-     * If more threads call wait() they must do so specifying the same mutex,
-     * otherwise the behaviour is undefined.
-     * \param m a locked pthread_mutex_t
-     */
-    void wait(pthread_mutex_t *m);
+    void wait(FastMutex& m);
 
     /**
      * Unlock the Mutex and wait until woken up or timeout occurs.
@@ -453,7 +479,7 @@ public:
      * otherwise the behaviour is undefined.
      * \param m a locked Mutex
      * \param absTime absolute timeout time in nanoseconds
-     * \return whether the return was due to a timout or wakeup
+     * \return whether the return was due to a timeout or wakeup
      */
     TimedWaitResult timedWait(Mutex& m, long long absTime);
 
@@ -463,77 +489,52 @@ public:
      * otherwise the behaviour is undefined.
      * \param m a locked FastMutex
      * \param absTime absolute timeout time in nanoseconds
-     * \return whether the return was due to a timout or wakeup
+     * \return whether the return was due to a timeout or wakeup
      */
-    TimedWaitResult timedWait(FastMutex& m, long long absTime)
-    {
-        return timedWait(m.get(), absTime);
-    }
+    TimedWaitResult timedWait(FastMutex& m, long long absTime);
 
     /**
-     * Unlock the pthread_mutex_t and wait until woken up or timeout occurs.
-     * If more threads call wait() they must do so specifying the same mutex,
-     * otherwise the behaviour is undefined.
-     * \param m a locked pthread_mutex_t
-     * \param absTime absolute timeout time in nanoseconds
-     * \return whether the return was due to a timout or wakeup
+     * Wakeup one waiting thread, chosen based on a wakeup policy that can be
+     * chosen at compile time in miosix_settings.h
      */
-    TimedWaitResult timedWait(pthread_mutex_t *m, long long absTime);
-
-    /**
-     * Wakeup one waiting thread.
-     * Currently implemented policy is fifo.
-     */
-    void signal()
-    {
-        //If the woken thread has higher priority than our priority, yield
-        if(doSignal()) Thread::yield();
-    }
+    void signal();
 
     /**
      * Wakeup all waiting threads.
      */
-    void broadcast()
-    {
-        //If at least one woken thread has higher priority than our priority, yield
-        if(doBroadcast()) Thread::yield();
-    }
+    void broadcast();
+
+    /**
+     * \internal
+     * \return true if no thread is waiting on the condition variable
+     */
+    bool empty() const;
 
     //Unwanted methods
     ConditionVariable(const ConditionVariable&) = delete;
     ConditionVariable& operator= (const ConditionVariable&) = delete;
 
 private:
-    /**
-     * \internal Element of a thread waiting list
-     */
-    class WaitToken : public IntrusiveListItem
-    {
-    public:
-        WaitToken(Thread *thread) : thread(thread) {}
-        Thread *thread; ///<\internal Waiting thread
-    };
-
-    /**
-     * Wakeup one waiting thread.
-     * Currently implemented policy is fifo.
-     * \return true if the woken thread has higher priority than the current one
-     */
-    bool doSignal();
-
-    /**
-     * Wakeup all waiting threads.
-     * \return true if at least one of the woken threads has higher priority
-     * than the current one
-     */
-    bool doBroadcast();
-
-    friend int ::pthread_cond_destroy(pthread_cond_t *);   //Needs condList
-    friend int ::pthread_cond_signal(pthread_cond_t *);    //Needs doSignal()
-    friend int ::pthread_cond_broadcast(pthread_cond_t *); //Needs doBroadcast()
-
-    //Memory layout must be kept in sync with pthread_cond, see pthread.cpp
-    IntrusiveList<WaitToken> condList;
+    /// Holds waiting threads, handles prioritization
+    /// A note for the curious: switching policy to ConsiderInheritedPriority
+    /// won't work and will likely crash. To be part of the priority inheritance
+    /// algorithm a synchronization primitive needs to be involved in the locked
+    /// list and class ConditionVariable doesn't. This is by design as you
+    /// should be locking only one mutex while calling wait() on a condition
+    /// variable and pass it to wait. Code that does this leaves no mutex locked
+    /// while waiting and thus does not need to deal with priority inheritance
+    /// while waiting on a condition variable. The priority of waiting threads
+    /// won't be boosted due to priority inheritance and threads will be
+    /// awakened in order their original "saved" priority.
+    /// Locking additional mutexes while waiting on a condition variable would
+    /// cause a priority boost while waiting, but doing so it's an antipattern
+    /// so we only care such code doesn't crash rather than correctly handling
+    /// prioritization in this case, and that's what IgnoreInheritedPriority
+    /// does: code exhibiting the antipattern will cause wakeup from the
+    /// condition variable in order of original "saved" priority, thus ignoring
+    /// inheritance but won't crash and won't need to go through the overhead
+    /// of adding condition variables to the locked list.
+    WaitQueue<PriorityPolicy::IgnoreInheritedPriority> waitQueue;
 };
 
 /**
@@ -554,6 +555,14 @@ private:
  * \note As with all other synchronization primitives, Semaphores are inherently
  * shared between multiple threads, therefore special care must be taken in
  * managing their lifetime and ownership.
+ *
+ * \warning Although multiple threads can wait on the same semaphore, they are
+ * awakened in fifo order, thus using only a Sempahore in device driver can
+ * cause priority inversion. It is suggested for device drivers which are
+ * expected to be called concurrently by multiple threads to first lock a
+ * KernelMutex to handle thread synchronization and allow kernel builds with
+ * full priority inheritance, and then use the Semaphore only to synchronize the
+ * single thread that locked the mutex with interrupts.
  * \since Miosix 2.5
  */
 class Semaphore
@@ -566,29 +575,9 @@ public:
     Semaphore(unsigned int initialCount=0) : count(initialCount) {}
 
     /**
-     * Increment the semaphore counter, putting threads out of sleep without
-     * triggering a reschedule.
-     * Only for use in IRQ handlers.
-     * \param hppw is set to `true' if a scheduler update is necessary to
-     * wake up a formerly sleeping thread with `Scheduler::IRQfindNextThread()`.
-     * Otherwise it is not modified.
-     * \warning Use in a thread context with interrupts disabled or with the
-     * kernel paused is forbidden.
-     */
-    void IRQsignal(bool& hppw);
-
-    /**
      * Increment the semaphore counter, waking up at most one waiting thread.
-     * Only for use in IRQ handlers.
-     * \warning Use in a thread context with interrupts disabled or with the
-     * kernel paused is forbidden.
      */
-    void IRQsignal()
-    {
-        bool hppw=false;
-        IRQsignal(hppw);
-        if(hppw) Scheduler::IRQfindNextThread();
-    }
+    void IRQsignal();
 
     /**
      * Increment the semaphore counter, waking up at most one waiting thread.
@@ -619,7 +608,7 @@ public:
         if(count>0)
         {
             // The wait "succeeded"
-            count--;
+            count-=1;
             return true;
         }
         return false;
@@ -632,7 +621,7 @@ public:
     bool tryWait()
     {
         // Global interrupt lock because Semaphore is IRQ-safe
-        FastInterruptDisableLock dLock;
+        FastGlobalIrqLock dLock;
         return IRQtryWait();
     }
 
@@ -655,7 +644,7 @@ public:
     int reset()
     {
         // Global interrupt lock because Semaphore is IRQ-safe
-        FastInterruptDisableLock dLock;
+        FastGlobalIrqLock dLock;
         return IRQreset();
     }
 
@@ -669,25 +658,10 @@ public:
     Semaphore& operator= (const Semaphore&) = delete;
 
 private:
-    /**
-     * \internal Element of a thread waiting list
-     */
-    class WaitToken : public IntrusiveListItem
-    {
-    public:
-        WaitToken(Thread *thread) : thread(thread) {}
-        Thread *thread; ///<\internal Waiting thread and spurious wakeup token
-    };
-
-    /**
-     * \internal
-     * Internal method that signals the semaphore without triggering a
-     * rescheduling for prioritizing newly-woken threads.
-     */
-    inline Thread *IRQsignalNoPreempt();
-
     volatile unsigned int count; ///< Counter of the semaphore
-    IntrusiveList<WaitToken> fifo; ///< List of waiting threads
+    /// List of waiting threads. Can't use WaitQueue as that class is meant to
+    /// be used in PK contenxt, not IRQ context
+    IntrusiveList<WaitToken> fifo;
 };
 
 /**

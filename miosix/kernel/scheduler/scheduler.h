@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2010, 2011 by Terraneo Federico                         *
+ *   Copyright (C) 2010-2025 by Terraneo Federico                          *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -27,15 +27,26 @@
 
 #pragma once
 
-#include "config/miosix_settings.h"
+#ifndef COMPILING_MIOSIX
+#error "This is header is private, it can't be used outside Miosix itself."
+#error "If your code depends on a private header, it IS broken."
+#endif //COMPILING_MIOSIX
+
+#include "miosix_settings.h"
 #include "kernel/scheduler/priority/priority_scheduler.h"
 #include "kernel/scheduler/control/control_scheduler.h"
 #include "kernel/scheduler/edf/edf_scheduler.h"
+#include "kernel/lock.h"
 #include "kernel/cpu_time_counter.h"
+#include "kernel/stackcheck.h"
+#include "interfaces_private/os_timer.h"
 
 namespace miosix {
 
 class Thread; //Forward declaration
+
+//These are defined in thread.cpp
+extern TimeSortedQueue<SleepToken,GetWakeupTime> sleepingList;
 
 /**
  * \internal
@@ -54,7 +65,7 @@ public:
      * Add a new thread to the scheduler.
      * \param thread a pointer to a valid thread instance.
      * The behaviour is undefined if a thread is added multiple timed to the
-     * scheduler, or if thread is NULL.
+     * scheduler, or if thread is nullptr.
      * \param priority the priority of the new thread.
      * Priority must be a positive value.
      * Note that the meaning of priority is scheduler specific.
@@ -64,11 +75,11 @@ public:
      * Note: this member function is called also before the kernel is started
      * to add the main and idle thread.
      */
-    static bool PKaddThread(Thread *thread, Priority priority)
+    static bool IRQaddThread(Thread *thread, Priority priority)
     {
-        bool res=T::PKaddThread(thread,priority);
+        bool res=T::IRQaddThread(thread,priority);
         #ifdef WITH_CPU_TIME_COUNTER
-        if(res) CPUTimeCounter::PKaddThread(thread);
+        if(res) CPUTimeCounter::IRQaddThread(thread);
         #endif
         return res;
     }
@@ -79,12 +90,10 @@ public:
      * deleted. A joinable thread is considered existing until it has been
      * joined, even if it returns from its entry point (unless it is detached
      * and terminates).
-     *
-     * Can be called both with the kernel paused and with interrupts disabled.
      */
-    static bool PKexists(Thread *thread)
+    static bool IRQexists(Thread *thread)
     {
-        return T::PKexists(thread);
+        return T::IRQexists(thread);
     }
 
     /**
@@ -92,12 +101,12 @@ public:
      * Called when there is at least one dead thread to be removed from the
      * scheduler
      */
-    static void PKremoveDeadThreads()
+    static void removeDeadThreads()
     {
         #ifdef WITH_CPU_TIME_COUNTER
-        CPUTimeCounter::PKremoveDeadThreads();
+        CPUTimeCounter::removeDeadThreads();
         #endif
-        T::PKremoveDeadThreads();
+        T::removeDeadThreads();
     }
 
     /**
@@ -108,9 +117,9 @@ public:
      * \param newPriority new thread priority.
      * Priority must be a positive value.
      */
-    static void PKsetPriority(Thread *thread, Priority newPriority)
+    static void IRQsetPriority(Thread *thread, Priority newPriority)
     {
-        T::PKsetPriority(thread,newPriority);
+        T::IRQsetPriority(thread,newPriority);
     }
 
     /**
@@ -131,13 +140,14 @@ public:
      * This is called before the kernel is started to by the kernel. The given
      * thread is the idle thread, to be run all the times where no other thread
      * can run.
+     * \param whichCore either 0 on single core platforms, or specify for which
+     * core this idle thread is meant to be used. Note that it is expected that
+     * during boot exactly one idle thread for each core is given to the
+     * scheduler
      */
-    static void IRQsetIdleThread(Thread *idleThread)
+    static void IRQsetIdleThread(int whichCore, Thread *idleThread)
     {
-        #ifdef WITH_CPU_TIME_COUNTER
-        CPUTimeCounter::IRQaddIdleThread(idleThread);
-        #endif
-        return T::IRQsetIdleThread(idleThread);
+        return T::IRQsetIdleThread(whichCore,idleThread);
     }
 
     /**
@@ -146,37 +156,126 @@ public:
      * its running status. For example when a thread become sleeping, waiting,
      * deleted or if it exits the sleeping or waiting status
      */
-    static void IRQwaitStatusHook(Thread *t)
+    static void IRQwaitStatusHook(Thread *thread)
     {
-        T::IRQwaitStatusHook(t);
-    }
-
-    /**
-     * This function is used to develop interrupt driven peripheral drivers.<br>
-     * Can be used ONLY inside an IRQ (and not when interrupts are disabled) to
-     * find next thread in READY status. If the kernel is paused, does nothing.
-     * Can be used for example if an IRQ causes a higher priority thread to be
-     * woken, to change context. Note that to use this function the IRQ must
-     * use the macros to save/restore context defined in portability.h
-     *
-     * If the kernel is paused does nothing.
-     * It's behaviour is to modify the global variable miosix::cur which always
-     * points to the currently running thread.
-     */
-    static void IRQfindNextThread()
-    {
-        T::IRQfindNextThread();
+        T::IRQwaitStatusHook(thread);
     }
     
     /**
      * \internal
-     * \return the next scheduled preemption set by the scheduler
+     * Called when a thread transitions from waiting/sleeping to ready.
+     * Must not be called if the thread is already ready.
+     */
+    static void IRQwokenThread(Thread* thread)
+    {
+        T::IRQwokenThread(thread);
+    }
+
+    /**
+     * \internal
+     * NOTE: If you're coming here because you were looking for a function
+     * named IRQfindNextThread(), it has been removed in Miosix 3.0.
+     * THIS FUNCTION (IRQrunScheduler()) IS NOT WHAT YOU WANT.
+     *
+     * In Miosix 3.0 IRQwakeup() automatically sets the scheduler interrupt to
+     * become pending if the priority of the woken thread is higher than the
+     * current one, so you only need to call IRQwakeup(), so stop including
+     * scheduler.h in your device drivers altogether!
+     *
+     * This function is used only by the kernel code to run the scheduler.
+     * It finds the next thread in READY status. If the kernel is paused,
+     * does nothing. It's behaviour is to modify the global variable
+     * miosix::runningThread which always points to the currently running thread.
+     *
+     * The implementation of this function takes the FastGlobalLockFromIrq
+     * so you must not take the lock before calling this function
+     */
+    static void IRQrunScheduler() noexcept
+    {
+        T::IRQrunScheduler();
+    }
+
+    /**
+     * \param coreId id of the core the preemption needs to be set for
+     * \param timeSlice desired time slice in nanoseconds for the thread that
+     * will be scheduled next. After that time, the scheduler will be called
+     * on coreId to perform preemption. The special value 0 means unbounded time
+     * slice (no preemption will be performed)
+     * \return the current time in nanoseconds if WITH_CPU_TIME_COUNTER is
+     * defined, else the return value should be ignored. This is done to
+     * call the relatively expensive IRQgetTime() only once despite both
+     * CPUTimeCounter and some code paths of the preemption code need it.
+     */
+    static long long IRQcomputePreemption(unsigned char coreId, unsigned int timeSlice)
+    {
+        using namespace std;
+
+        long long t=0;
+        #ifdef OS_TIMER_MODEL_UNIFIED
+        #ifdef WITH_SMP
+        if(coreId!=WAKEUP_HANDLING_CORE)
+        {
+            #ifdef WITH_CPU_TIME_COUNTER
+            t=IRQgetTime();
+            #endif //WITH_CPU_TIME_COUNTER
+            // IRQosTimerSetPreemption is to be used by all cores that are not
+            // WAKEUP_HANDLING_CORE
+            if(timeSlice>0) IRQosTimerSetPreemption(timeSlice);
+        } else {
+        #endif //WITH_SMP
+            t=IRQgetTime();
+            long long firstWakeup;
+            if(sleepingList.empty()) firstWakeup=numeric_limits<long long>::max();
+            else firstWakeup=sleepingList.front()->wakeupTime;
+            long long nextPreempt;
+            if(timeSlice>0) nextPreempt=t+timeSlice;
+            else nextPreempt=numeric_limits<long long>::max();
+            nextPreemptionWakeupCore=nextPreempt;
+            // We could avoid setting an interrupt if the sleeping list is empty
+            // and we're about to run idle but there's no such hurry to run idle
+            // anyway, so why bother?
+            IRQosTimerSetInterrupt(min(firstWakeup,nextPreempt));
+        #ifdef WITH_SMP
+        }
+        #endif //WITH_SMP
+        #else //OS_TIMER_MODEL_UNIFIED
+        if(timeSlice>0) IRQosTimerSetPreemption(timeSlice);
+        #ifdef WITH_CPU_TIME_COUNTER
+        t=IRQgetTime();
+        #endif //WITH_CPU_TIME_COUNTER
+        #endif //OS_TIMER_MODEL_UNIFIED
+        return t;
+    }
+    
+    #ifdef OS_TIMER_MODEL_UNIFIED
+    /**
+     * \internal
+     * On single core CPUs, the hardware timer is set considering both the
+     * earliest thread wakeup from sleep and and the end of the time quantum
+     * (preemption) of the currently running thread. This function returns the
+     * next preemption time, if any, of the currently running thread. If there
+     * are threads with a wakeup time earlier than the next preemption, they are
+     * not considered by this function that only returns the next preemption.
+     *
+     * On multi core CPUs this function returns the next preemption time for the
+     * WAKEUP_HANDLING_CORE, the only core that performs the wakeup from sleep
+     * logic. All other cores only set their timer to schedule preemptions, and
+     * there is currently no getter for this value.
+     *
+     * \return the next scheduled preemption set by the scheduler for the
+     * WAKEUP_HANDLING_CORE.
      * In case no preemption is set returns numeric_limits<long long>::max()
      */
-    static long long IRQgetNextPreemption()
+    static long long IRQgetWakeupCoreNextPreemption()
     {
-        return T::IRQgetNextPreemption();
+        return nextPreemptionWakeupCore;
     }
+
+private:
+    ///\internal On single core CPUs, end of time quantum (preemption) for the
+    ///only core. On multi core CPUs, end of time quantum for WAKEUP_HANDLING_CORE
+    static long long nextPreemptionWakeupCore;
+    #endif //OS_TIMER_MODEL_UNIFIED
 };
 
 #ifdef SCHED_TYPE_PRIORITY
@@ -186,7 +285,7 @@ typedef basic_scheduler<ControlScheduler> Scheduler;
 #elif defined(SCHED_TYPE_EDF)
 typedef basic_scheduler<EDFScheduler> Scheduler;
 #else
-#error No scheduler selected in config/miosix_settings.h
+#error No scheduler selected in miosix_settings.h
 #endif
 
 } //namespace miosix

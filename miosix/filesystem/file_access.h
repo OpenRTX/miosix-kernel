@@ -38,7 +38,8 @@
 #include "devfs/devfs.h"
 #include "kernel/sync.h"
 #include "kernel/intrusive.h"
-#include "config/miosix_settings.h"
+#include "kernel/thread.h"
+#include "miosix_settings.h"
 
 #ifdef WITH_FILESYSTEM
 
@@ -412,7 +413,7 @@ private:
      */
     int getAvailableFd();
     
-    mutable FastMutex mutex; ///< Locks on writes to file object pointers, not on accesses
+    mutable KernelMutex mutex; ///< Locks on writes to file object pointers, not on accesses
     
     std::string cwd; ///< Current working directory
     
@@ -531,15 +532,16 @@ public:
     void addFileDescriptorTable(FileDescriptorTable *fdt)
     {
         #ifdef WITH_PROCESSES
-        if(isKernelRunning())
+        // This function is also called before the kernel is started, and not
+        // only we don't need to lock a mutex in this context, we can't.
+        // TODO: can we just use PauseKernelLock here?
+        if(PauseKernelLock::inLockedSection())
         {
-            Lock<FastMutex> l(mutex);
             fileTables.push_back(fdt);
-        } else {
-            //This function is also called before the kernel is started,
-            //and in this case it is forbidden to lock mutexes
-            fileTables.push_back(fdt);
+            return;
         }
+        Lock<KernelMutex> l(mutex);
+        fileTables.push_back(fdt);
         #endif //WITH_PROCESSES
     }
     
@@ -551,7 +553,7 @@ public:
     void removeFileDescriptorTable(FileDescriptorTable *fdt)
     {
         #ifdef WITH_PROCESSES
-        Lock<FastMutex> l(mutex);
+        Lock<KernelMutex> l(mutex);
         fileTables.remove(fdt);
         #endif //WITH_PROCESSES
     }
@@ -567,12 +569,12 @@ private:
     /**
      * Constructor, private as it is a singleton
      */
-    FilesystemManager() : mutex(FastMutex::RECURSIVE) {}
+    FilesystemManager() : mutex(MutexOptions::RECURSIVE) {}
     
     FilesystemManager(const FilesystemManager&);
     FilesystemManager& operator=(const FilesystemManager&);
     
-    FastMutex mutex; ///< To protect against concurrent access
+    KernelMutex mutex; ///< To protect against concurrent access
     
     /// Mounted filesystem
     std::map<StringPart,intrusive_ref_ptr<FilesystemBase> > filesystems;

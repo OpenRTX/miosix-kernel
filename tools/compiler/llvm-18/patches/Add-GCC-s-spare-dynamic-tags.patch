@@ -1,0 +1,76 @@
+From 121c08a2dd3b3e170bc10f622bbe21fa8025990a Mon Sep 17 00:00:00 2001
+From: Alberto Nidasio <nidasioalberto@gmail.com>
+Date: Thu, 5 Sep 2024 09:53:55 +0200
+Subject: [PATCH 391/392] Add GCC's `--spare-dynamic-tags`
+
+---
+ lld/ELF/Config.h              | 5 +++++
+ lld/ELF/Driver.cpp            | 6 ++++++
+ lld/ELF/Options.td            | 3 +++
+ lld/ELF/SyntheticSections.cpp | 3 +++
+ 4 files changed, 17 insertions(+)
+
+diff --git a/lld/ELF/Config.h b/lld/ELF/Config.h
+index 3a4a47d900fe..607420eaa51e 100644
+--- a/lld/ELF/Config.h
++++ b/lld/ELF/Config.h
+@@ -429,6 +429,11 @@ struct Config {
+ 
+   unsigned threadCount;
+ 
++  // This option specifies the number of empty slots to leave in the .dynamic
++  // section of ELF shared objects. Empty slots may be needed by post processing
++  // tools, such as the prelinker. The default is 0.
++  unsigned spareDynamicTags = 0;
++
+   // If an input file equals a key, remap it to the value.
+   llvm::DenseMap<llvm::StringRef, llvm::StringRef> remapInputs;
+   // If an input file matches a wildcard pattern, remap it to the value.
+diff --git a/lld/ELF/Driver.cpp b/lld/ELF/Driver.cpp
+index 8b2c32b15348..0b1b7fd65eb6 100644
+--- a/lld/ELF/Driver.cpp
++++ b/lld/ELF/Driver.cpp
+@@ -1595,6 +1595,12 @@ static void readConfigs(opt::InputArgList &args) {
+     config->thinLTOJobs = arg->getValue();
+   config->threadCount = parallel::strategy.compute_thread_count();
+ 
++  // --spare-dynamic-tags= takes a positive integer.
++  if (auto *arg = args.getLastArg(OPT_spare_dynamic_tags)) {
++    StringRef v(arg->getValue());
++    llvm::to_integer(v, config->spareDynamicTags, 0);
++  }
++
+   if (config->ltoPartitions == 0)
+     error("--lto-partitions: number of threads must be > 0");
+   if (!get_threadpool_strategy(config->thinLTOJobs))
+diff --git a/lld/ELF/Options.td b/lld/ELF/Options.td
+index c2c9cabc92a4..09084429d465 100644
+--- a/lld/ELF/Options.td
++++ b/lld/ELF/Options.td
+@@ -418,6 +418,9 @@ defm soname: Eq<"soname", "Set DT_SONAME">;
+ defm sort_section:
+   Eq<"sort-section", "Specifies sections sorting rule when linkerscript is used">;
+ 
++def spare_dynamic_tags: JJ<"spare-dynamic-tags=">,
++  HelpText<"This option specifies the number of empty slots to leave in the .dynamic section of ELF shared objects. Empty slots may be needed by post processing tools, such as the prelinker. When not specified, no spare tags are created.">;
++
+ def start_group: F<"start-group">,
+   HelpText<"Ignored for compatibility with GNU unless you pass --warn-backrefs">;
+ 
+diff --git a/lld/ELF/SyntheticSections.cpp b/lld/ELF/SyntheticSections.cpp
+index bada394aa30d..cfb27e97b09c 100644
+--- a/lld/ELF/SyntheticSections.cpp
++++ b/lld/ELF/SyntheticSections.cpp
+@@ -1550,6 +1550,9 @@ DynamicSection<ELFT>::computeContents() {
+   if (config->emachine == EM_PPC64)
+     addInt(DT_PPC64_OPT, getPPC64TargetInfo()->ppc64DynamicSectionOpt);
+ 
++  for (unsigned i = 0; i < config->spareDynamicTags; i++)
++    addInt(DT_NULL, 0);
++
+   addInt(DT_NULL, 0);
+   return entries;
+ }
+-- 
+2.39.2 (Apple Git-143)
+

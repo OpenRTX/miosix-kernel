@@ -30,8 +30,7 @@
 * A collection of "utilities".
 ************************************************************************/
 
-#ifndef UTIL_H
-#define UTIL_H
+#pragma once
 
 #include "kernel/cpu_time_counter.h"
 #include <vector>
@@ -69,16 +68,16 @@ public:
     static unsigned int getAbsoluteFreeStack();
 
     /**
-     * \return current free stack  of current thread.<br>
+     * \return current free stack of current thread.<br>
      * Current free stack is the free stack at the moment when the this
      * function is called.
      */
     static unsigned int getCurrentFreeStack();
 
     /**
-     * \return heap size which is defined in the linker script.<br>The heap is
-     * shared among all threads, therefore this function returns the same value
-     * regardless which thread is called in.
+     * \return heap size.<br>
+     * The heap is shared among all threads, therefore this function returns the
+     * same value regardless which thread is called in.
      */
     static unsigned int getHeapSize();
 
@@ -105,6 +104,18 @@ private:
 };
 
 /**
+ * Format an unsigned integer in hexadecimal notation into a specified buffer.
+ * \param out The address of the destination buffer.
+ * \param n   The number to be formatted.
+ * \param len The amount of characters to output into the buffer. If n is
+ *            greater than 16^len, only the least significant len digits will
+ *            be considered.
+ * \returns The address of the character one past the last one emitted. This
+ * function does *not* produce any final terminating NUL ('\0').
+ */
+char *formatHex(char *out, unsigned long n, unsigned int len);
+
+/**
  * Dump a memory area in this format
  * 0x00000000 | 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 | ................
  * \param start pointer to beginning of memory block to dump
@@ -117,7 +128,7 @@ void memDump(const void *start, int len);
 /**
  * This class implements a top-like view of the CPU usage of all current
  * threads. The implementation is built upon CPUTimeCounter and therefore also
- * requires `WITH_CPU_TIME_COUNTER` to be defined in config/miosix_settings.h.
+ * requires `WITH_CPU_TIME_COUNTER` to be defined in miosix_settings.h.
  * 
  * CPUProfiler can be integrated in an existing update loop by instantiating it
  * and then invoking the update() and print() methods at regular intervals:
@@ -209,5 +220,3 @@ private:
  */
 
 } //namespace miosix
-
-#endif //UTIL_H

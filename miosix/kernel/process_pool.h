@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2012 - 2024 by Terraneo Federico and Luigi Rucco        *
+ *   Copyright (C) 2012 - 2026 by Terraneo Federico and Luigi Rucco        *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -28,14 +28,10 @@
 #pragma once
 
 #include <map>
-#include <utility>
+#include <tuple>
 
 #ifndef TEST_ALLOC
 #include <miosix.h>
-#else //TEST_ALLOC
-#include <iostream>
-#include <typeinfo>
-#include <sstream>
 #endif //TEST_ALLOC
 
 #ifdef WITH_PROCESSES
@@ -44,7 +40,8 @@ namespace miosix {
 
 /**
  * This class allows to handle a memory area reserved for the allocation of
- * processes' images. This memory area is called process pool.
+ * processes data blocks and, for programs not stored in a XIP filesystem, also
+ * for the in-RAM copy of the elf file. This memory area is called process pool.
  */
 class ProcessPool
 {
@@ -59,14 +56,16 @@ public:
      * \param size size in bytes (despite the returned pointer is an
      * unsigned int*) of the requested memory
      * \return a pair with the pointer to the allocated memory and the actual
-     * allocated size, which could be greater or equal than the requested size
-     * to accomodate limitations in the allocator and memory protection unit.
-     * Note that due to memory protection unit limitations the pointer is
-     * size-aligned, so that for example if a 16KByte block is requested,
-     * the returned pointer is aligned on a 16KB boundary.
+     * allocated size, which could be greater or equal than the requested size.
+     * NOTE in the current implementation allocations are at least 1KB and
+     * rounded to the next power of 2. Additionally, the returned pointer is
+     * size-aligned, so that for example if a 16KByte block is requested, the
+     * returned pointer is aligned on a 16KB boundary.
+     * This is required by the MPU of certain ARM CPUs, and also structurally
+     * prevents allocator fragmentation.
      * \throws bad_alloc if out of memory
      */
-    std::pair<unsigned int *, unsigned int> allocate(unsigned int size);
+    std::tuple<unsigned int *, unsigned int> allocate(unsigned int size);
     
     /**
      * Deallocate a memory block.
@@ -79,37 +78,12 @@ public:
     /**
      * Print the state of the allocator, used for debugging
      */
-    void printAllocatedBlocks()
-    {
-        using namespace std;
-        map<unsigned int*, unsigned int>::iterator it;
-        cout<<endl;
-        for(it=allocatedBlocks.begin();it!=allocatedBlocks.end();it++)
-            cout <<"block of size " << it->second
-                 << " allocated @ " << it->first<<endl;
-        
-        cout<<"Bitmap:"<<endl;
-        const int SHIFT = 8 * sizeof(unsigned int);
-        const unsigned int MASK = 1 << (SHIFT-1);
-        int bitarray[32];
-        for(int i=0; i<(poolSize/blockSize)/(sizeof(unsigned int)*8);i++)
-        {   
-            int value=bitmap[i];
-            for ( int j = 0; j < SHIFT; j++ ) 
-            {
-                bitarray[31-j]= ( value & MASK ? 1 : 0 );
-                value <<= 1;
-            }
-            for(int j=0;j<32;j++)
-                cout<<bitarray[j];
-            cout << endl;
-        }  
-    }
+    void printAllocatedBlocks();
     #endif //TEST_ALLOC
     
 private:
-    ProcessPool(const ProcessPool&);
-    ProcessPool& operator= (const ProcessPool&);
+    ProcessPool(const ProcessPool&)=delete;
+    ProcessPool& operator= (const ProcessPool&)=delete;
     
     /**
      * Constructor.
@@ -157,7 +131,7 @@ private:
     ///Lists all allocated blocks, allows to retrieve their sizes
     std::map<unsigned int*,unsigned int> allocatedBlocks;
     #ifndef TEST_ALLOC
-    miosix::FastMutex mutex; ///< Mutex to guard concurrent access
+    KernelMutex mutex;      ///< Mutex to guard concurrent access
     #endif //TEST_ALLOC
 };
 

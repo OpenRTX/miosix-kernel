@@ -86,7 +86,7 @@ public:
      */
     unsigned int size() const
     {
-        Lock<FastMutex> l(m);
+        Lock<KernelMutex> l(m);
         return events.size();
     }
     
@@ -95,7 +95,7 @@ public:
      */
     bool empty() const
     {
-        Lock<FastMutex> l(m);
+        Lock<KernelMutex> l(m);
         return events.empty();
     }
 
@@ -104,7 +104,7 @@ public:
 
 private:
     std::list<std::function<void ()>> events; ///< Event queue
-    mutable FastMutex m; ///< Mutex for synchronisation
+    mutable KernelMutex m; ///< Mutex for synchronisation
     ConditionVariable cv; ///< Condition variable for synchronisation
 };
 
@@ -128,7 +128,7 @@ protected:
      * \param events pointer to event queue
      * \param size event queue size
      */
-    void postImpl(Callback<SlotSize>& event, Callback<SlotSize> *events,
+    void postImpl(Callback<SlotSize>&& event, Callback<SlotSize> *events,
             unsigned int size);
 
     /**
@@ -136,12 +136,10 @@ protected:
      * \param event event to post
      * \param events pointer to event queue
      * \param size event queue size
-     * \param hppw if not null set to true if a higher priority thread is
-     * awakened, otherwise the variable is not modified
      * \return false if there was no space in the queue
      */
-    bool IRQpostImpl(Callback<SlotSize>& event, Callback<SlotSize> *events,
-            unsigned int size, bool *hppw=nullptr);
+    bool IRQpostImpl(Callback<SlotSize>&& event, Callback<SlotSize> *events,
+            unsigned int size);
 
     /**
      * This function blocks waiting for events being posted, and when available
@@ -168,7 +166,7 @@ protected:
      */
     unsigned int sizeImpl() const
     {
-        FastInterruptDisableLock dLock;
+        FastGlobalIrqLock dLock;
         return n;
     }
 
@@ -190,27 +188,25 @@ private:
 };
 
 template<unsigned SlotSize>
-void FixedEventQueueBase<SlotSize>::postImpl(Callback<SlotSize>& event,
+void FixedEventQueueBase<SlotSize>::postImpl(Callback<SlotSize>&& event,
         Callback<SlotSize> *events, unsigned int size)
 {
-    //Not FastInterruptDisableLock as the operator= of the bound
-    //parameters of the Callback may allocate
-    InterruptDisableLock dLock;
-    while(IRQpostImpl(event,events,size)==false)
+    FastGlobalIrqLock dLock;
+    while(IRQpostImpl(std::move(event),events,size)==false)
     {
         WaitToken w(Thread::IRQgetCurrentThread());
         waitingPut.push_back(&w);
         //w.thread must be set to nullptr to protect against spurious wakeups
-        while(w.thread) Thread::IRQenableIrqAndWait(dLock);
+        while(w.thread) Thread::IRQglobalIrqUnlockAndWait(dLock);
     }
 }
 
 template<unsigned SlotSize>
-bool FixedEventQueueBase<SlotSize>::IRQpostImpl(Callback<SlotSize>& event,
-        Callback<SlotSize> *events, unsigned int size, bool *hppw)
+bool FixedEventQueueBase<SlotSize>::IRQpostImpl(Callback<SlotSize>&& event,
+        Callback<SlotSize> *events, unsigned int size)
 {
     if(n>=size) return false;
-    events[put]=event; //This may allocate memory
+    events[put]=std::move(event);
     if(++put>=size) put=0;
     n++;
     if(waitingGet.empty()==false)
@@ -219,8 +215,6 @@ bool FixedEventQueueBase<SlotSize>::IRQpostImpl(Callback<SlotSize>& event,
         waitingGet.front()->thread=nullptr;
         waitingGet.pop_front();
         t->IRQwakeup();
-        if(hppw && t->IRQgetPriority()>Thread::IRQgetCurrentThread()->IRQgetPriority())
-            *hppw=true;
     }
     return true;
 }
@@ -229,9 +223,7 @@ template<unsigned SlotSize>
 void FixedEventQueueBase<SlotSize>::runImpl(Callback<SlotSize> *events,
         unsigned int size)
 {
-    //Not FastInterruptDisableLock as the operator= of the bound
-    //parameters of the Callback may allocate
-    InterruptDisableLock dLock;
+    FastGlobalIrqLock dLock;
     for(;;)
     {
         while(n<=0)
@@ -239,9 +231,9 @@ void FixedEventQueueBase<SlotSize>::runImpl(Callback<SlotSize> *events,
             WaitToken w(Thread::IRQgetCurrentThread());
             waitingGet.push_back(&w);
             //w.thread must be set to nullptr to protect against spurious wakeups
-            while(w.thread) Thread::IRQenableIrqAndWait(dLock);
+            while(w.thread) Thread::IRQglobalIrqUnlockAndWait(dLock);
         }
-        Callback<SlotSize> f=events[get]; //This may allocate memory
+        Callback<SlotSize> f=std::move(events[get]);
         if(++get>=size) get=0;
         n--;
         if(waitingPut.empty()==false)
@@ -251,7 +243,7 @@ void FixedEventQueueBase<SlotSize>::runImpl(Callback<SlotSize> *events,
             waitingPut.pop_front();
         }
         {
-            InterruptEnableLock eLock(dLock);
+            FastGlobalIrqUnlock eLock(dLock);
             f();
         }
     }
@@ -263,11 +255,9 @@ void FixedEventQueueBase<SlotSize>::runOneImpl(Callback<SlotSize> *events,
 {
     Callback<SlotSize> f;
     {
-        //Not FastInterruptDisableLock as the operator= of the bound
-        //parameters of the Callback may allocate
-        InterruptDisableLock dLock;
+        FastGlobalIrqLock dLock;
         if(n<=0) return;
-        f=events[get]; //This may allocate memory
+        f=std::move(events[get]);
         if(++get>=size) get=0;
         n--;
         if(waitingPut.empty()==false)
@@ -313,33 +303,40 @@ public:
     /**
      * Post an event, blocking if the event queue is full.
      * 
-     * \param event function function to be called in the thread that calls
-     * run() or runOne(). Bind can be used to bind parameters to the function.
-     * Unlike with the EventQueue, the operator= of the bound parameters have
-     * the restriction that they need to be callable from inside a
-     * InterruptDisableLock without causing undefined behaviour, so they
-     * must not, open files, print, ... but can allocate memory.
+     * \param event The function to be invoked in the thread that calls
+     * run() or runOne(), in the form of a functor object.
+     * Bind can be used to bind parameters to the function and make a suitable
+     * functor.
+     * The type of the functor must be move-constructible, to ensure it is
+     * callable from inside a GlobalIrqLock without causing memory allocations.
+     * Additionally their move constructor must not perform things that are
+     * forbidden in interrupt context such as open files, print, ...
      */
-    void post(Callback<SlotSize> event)
+    template<typename T>
+    void post(T&& event)
     {
-        this->postImpl(event,events,NumSlots);
+        this->postImpl(Callback<SlotSize>(std::move(event)),events,NumSlots);
     }
     
     /**
      * Post an event in the queue, or return if the queue was full.
      * 
-     * \param event function function to be called in the thread that calls
-     * run() or runOne(). Bind can be used to bind parameters to the function.
-     * Unlike with the EventQueue, the operator= of the bound parameters have
-     * the restriction that they need to be callable from inside a
-     * InterruptDisableLock without causing undefined behaviour, so they
-     * must not open files, print, ... but can allocate memory.
+     * \param event The function to be invoked in the thread that calls
+     * run() or runOne(), in the form of a functor object.
+     * Bind can be used to bind parameters to the function and make a suitable
+     * functor.
+     * The type of the functor must be move-constructible, to ensure it is
+     * callable from inside a GlobalIrqLock without causing memory allocations.
+     * Additionally their move constructor must not perform things that are
+     * forbidden in interrupt context such as open files, print, ...
      * \return false if there was no space in the queue
      */
-    bool postNonBlocking(Callback<SlotSize> event)
+    template<typename T>
+    bool postNonBlocking(T&& event)
     {
-        InterruptDisableLock dLock;
-        return this->IRQpostImpl(event,events,NumSlots);
+        GlobalIrqLock dLock;
+        return this->IRQpostImpl(Callback<SlotSize>(std::move(event)),
+                                 events,NumSlots);
     }
 
     /**
@@ -347,47 +344,21 @@ public:
      * Can be called only with interrupts disabled or within an interrupt
      * handler, allowing device drivers to post an event to a thread.
      * 
-     * \param event function function to be called in the thread that calls
-     * run() or runOne(). Bind can be used to bind parameters to the function.
-     * Unlike with the EventQueue, the operator= of the bound parameters have
-     * the restriction that they need to be callable with interrupts disabled
-     * so they must not open files, print, ...
-     * 
-     * \warning If the call is made from within an InterruptDisableLock the copy
-     * constructors can allocate memory, while if the call is made from an
-     * interrupt handler or a FastInterruptFisableLock memory allocation is
-     * forbidden.
+     * \param event The function to be invoked in the thread that calls
+     * run() or runOne(), in the form of a functor object.
+     * Bind can be used to bind parameters to the function and make a suitable
+     * functor.
+     * The type of the functor must be move-constructible, to ensure it is
+     * callable from inside a GlobalIrqLock without causing memory allocations.
+     * Additionally their move constructor must not perform things that are
+     * forbidden in interrupt context such as open files, print, ...
      * \return false if there was no space in the queue
      */
-    bool IRQpost(Callback<SlotSize> event)
+    template<typename T>
+    bool IRQpost(T&& event)
     {
-        return this->IRQpostImpl(event,events,NumSlots);
-    }
-    
-    /**
-     * Post an event in the queue, or return if the queue was full.
-     * Can be called only with interrupts disabled or within an interrupt
-     * handler, allowing device drivers to post an event to a thread.
-     * 
-     * \param event function function to be called in the thread that calls
-     * run() or runOne(). Bind can be used to bind parameters to the function.
-     * Unlike with the EventQueue, the operator= of the bound parameters have
-     * the restriction that they need to be callable with interrupts disabled
-     * so they must not open files, print, ...
-     * 
-     * \warning If the call is made from within an InterruptDisableLock the copy
-     * constructors can allocate memory, while if the call is made from an
-     * interrupt handler or a FastInterruptFisableLock memory allocation is
-     * forbidden.
-     * \param hppw returns true if a higher priority thread was awakened as
-     * part of posting the event. Can be used inside an IRQ to call the
-     * scheduler.
-     * \return false if there was no space in the queue
-     */
-    bool IRQpost(Callback<SlotSize> event, bool& hppw)
-    {
-        hppw=false;
-        return this->IRQpostImpl(event,events,NumSlots,&hppw);
+        return this->IRQpostImpl(Callback<SlotSize>(std::move(event)),
+                                 events,NumSlots);
     }
 
     /**

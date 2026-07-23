@@ -27,24 +27,15 @@
 
 #pragma once
 
-// Before you can compile the kernel you have to configure it by editing this
-// file. After that, comment out this line to disable the reminder error.
-// The PARSING_FROM_IDE is because Netbeans gets confused by this, it is never
-// defined when compiling the code.
-#ifndef PARSING_FROM_IDE
-#error This error is a reminder that you have not edited miosix_settings.h yet.
-#endif //PARSING_FROM_IDE
-
 /**
  * \file miosix_settings.h
  * NOTE: this file contains ONLY configuration options that are not dependent
  * on architecture specific details. The other options are in the following
  * files which are included here:
- * miosix/arch/architecture name/common/arch_settings.h
  * miosix/config/arch/architecture name/board name/board_settings.h
  */
-#include "arch_settings.h"
 #include "board_settings.h"
+#include <limits>
 
 /**
  * \internal
@@ -75,6 +66,10 @@ namespace miosix {
 //#define SCHED_TYPE_CONTROL_BASED
 //#define SCHED_TYPE_EDF
 
+/// \def WITH_THREAD_AFFINITY
+/// Enable support for setting the core affinity of threads in the scheduler
+//#define WITH_THREAD_AFFINITY
+
 /// \def WITH_CPU_TIME_COUNTER
 /// Allows to enable/disable CPUTimeCounter to save code size and remove its
 /// overhead from the scheduling process. By default it is not defined
@@ -88,7 +83,11 @@ namespace miosix {
 /// \def WITH_FILESYSTEM
 /// Allows to enable/disable filesystem support to save code size
 /// By default it is defined (filesystem support is enabled)
-#define WITH_FILESYSTEM
+//#define WITH_FILESYSTEM
+
+// The following options make sense only when filesystem is enabled, so they are
+// always left undefined otherwise
+#ifdef WITH_FILESYSTEM
 
 /// \def WITH_DEVFS
 /// Allows to enable/disable DevFs support to save code size
@@ -127,7 +126,6 @@ constexpr unsigned int FATFS_EXTEND_BUFFER=512;
 /// filesystem is synced so that a power failure happens data is not lost
 /// (unless power failure happens exactly between the write and the sync)
 /// Unfortunately write latency and throughput becomes twice as worse
-/// By default it is defined (slow but safe)
 //#define SYNC_AFTER_WRITE
 
 /// Maximum number of files a single process (or the kernel) can open. This
@@ -142,11 +140,14 @@ const unsigned char MAX_OPEN_FILES=8;
 /// call service and, if the hardware supports it, the MPU to provide memory
 /// isolation of processes
 //#define WITH_PROCESSES
+
 /// RomFS is enabled by default when using processes. Comment the following
 /// lines if you want to use processes without RomFS.
 #if defined(WITH_PROCESSES) && !defined(WITH_ROMFS)
 #define WITH_ROMFS
 #endif
+
+#endif // WITH_FILESYSTEM
 
 //
 // C/C++ standard library I/O (stdin, stdout and stderr related)
@@ -168,22 +169,42 @@ const unsigned char MAX_OPEN_FILES=8;
 // Kernel related options (stack sizes, priorities)
 //
 
+/// Enable additional assertions useful for debugging but adding more run-time
+/// overhead. Three levels are implemented
+/// None: Do not add extra checks, leading to fastest code. This is the default.
+/// Application: Only add checks that are useful to debug kernel-level
+/// application programming errors. Useful during application code debugging.
+/// Kernel: Also add checks that are useful to debug kernel code. Useful
+/// during kernel code debugging. Adds significant run-time overhead!
+enum class ExtraChecks { None, Application, Kernel };
+constexpr auto extraChecks=ExtraChecks::None;
+
+/// \def WITH_SLEEP
+/// Enable power saving sleep support. If enabled, the idle thread will use the
+/// architecturally provided machine instruction to stop the CPU whenever no
+/// ready thread exists, to save power.
+/// Disabling this option <b>does not</b> disable the possibility for threads
+/// to sleep. Application code will not notice the difference with or without
+/// this option. This option will only change the CPU energy consumption when
+/// threads are sleeping.
+/// In general, you should keep this option enabled, the only reason to disable
+/// this option is that on some architectures debuggers lose communication with
+/// the device if it enters sleep mode. On these architectures, you can disable
+/// this option during debug builds and enable it again in release builds. For
+/// this reason, the option used to be called JTAG_DISABLE_SLEEP
+#define WITH_SLEEP
+
 /// \def WITH_DEEP_SLEEP 
-/// Adds interfaces and required variables to support deep sleep state switch
-/// automatically when peripherals are not required
+/// Adds interfaces and required variables to allow the idle thread to
+/// autonomously enter the hardware-provided deep sleep state and thus achieve
+/// greater energy saving by turning off also clocks and peripherals when
+/// possible. Requires device drivers to support this option. Not all chips and
+/// boards support this.
 //#define WITH_DEEP_SLEEP
 
-/**
- * \def JTAG_DISABLE_SLEEP
- * JTAG debuggers lose communication with the device if it enters sleep
- * mode, so to use debugging it is necessary to disable sleep in the idle thread.
- * By default it is not defined (idle thread calls sleep).
- */
-//#define JTAG_DISABLE_SLEEP
-
-#if defined(WITH_DEEP_SLEEP) && defined(JTAG_DISABLE_SLEEP)
-#error Deep sleep cannot work together with jtag
-#endif //defined(WITH_PROCESSES) && !defined(WITH_DEVFS)
+#if defined(WITH_DEEP_SLEEP) && !defined(WITH_SLEEP)
+#error Deep sleep requires sleep support
+#endif //defined(WITH_DEEP_SLEEP) && !defined(WITH_SLEEP)
 
 /// Minimum stack size (MUST be divisible by 4)
 const unsigned int STACK_MIN=256;
@@ -225,29 +246,117 @@ static_assert(STACK_DEFAULT_FOR_PTHREAD>=STACK_MIN,"");
 static_assert(MIN_PROCESS_STACK_SIZE>=STACK_MIN,"");
 static_assert(SYSTEM_MODE_PROCESS_STACK_SIZE>=STACK_MIN,"");
 
-/// Number of priorities (MUST be >1)
-/// PRIORITY_MAX-1 is the highest priority, 0 is the lowest. -1 is reserved as
-/// the priority of the idle thread.
-/// The meaning of a thread's priority depends on the chosen scheduler.
+// The meaning of a thread's priority depends on the chosen scheduler.
 #ifdef SCHED_TYPE_PRIORITY
-//Can be modified, but a high value makes context switches more expensive
-const short int PRIORITY_MAX=4;
+/// The constant NUM_PRIORITIES defines the number of priorities the scheduler
+/// can handle. Value must be at least 1 and up to 128 since the priority value
+/// is stored in a char in the priority scheduler. A higher value makes context
+/// switches more expensive and increases the memory required by the scheduler
+/// and synchronization primitives (Mutex and ConditionVariable).
+/// Can be set to 1 for non-real-time applications, in which case the scheduler
+/// becomes a pure round robin without priorities and code size and memory
+/// occupation is minimized.
+/// NUM_PRIORITIES-1 is the highest priority, 0 is the lowest. -1 is reserved as
+/// the priority of the idle thread.
+#define NUM_PRIORITIES 4
+/// Default priority. Priority of main() and threads created with PTHREAD/C++11
+const signed char DEFAULT_PRIORITY=1;
+static_assert(NUM_PRIORITIES>=0 && NUM_PRIORITIES<=128,"");
+static_assert(DEFAULT_PRIORITY>=0 && DEFAULT_PRIORITY<NUM_PRIORITIES,"");
 #elif defined(SCHED_TYPE_CONTROL_BASED)
-//Don't touch, the limit is due to the fixed point implementation
-//It's not needed for if floating point is selected, but kept for consistency
-const short int PRIORITY_MAX=64;
+/// The constant NUM_PRIORITIES defines the number of priorities (MUST be >=1)
+/// NUM_PRIORITIES-1 is the highest priority, 0 is the lowest. -1 is reserved as
+/// the priority of the idle thread.
+/// Don't change this value, the limit is due to the fixed point implementation
+/// It's not needed for if floating point is selected, but kept for consistency
+const short int NUM_PRIORITIES=64;
+/// Default priority. Priority of main() and threads created with PTHREAD/C++11
+const short int DEFAULT_PRIORITY=1;
+static_assert(DEFAULT_PRIORITY>=0 && DEFAULT_PRIORITY<NUM_PRIORITIES,"");
 #else //SCHED_TYPE_EDF
-//Doesn't exist for this kind of scheduler
+/// The EDF scheduler redefines priorities as the thread absolute deadline.
+/// Additionally, the constant DEFAULT_PRIORITY is the default priority value
+/// for main() and threads created with PTHREAD/C++11. This priority level
+/// corrsponds to non real-time threads, which are scheduled using round-robin.
+/// A thread can, at any moment, set its own priority to an absolute deadline
+/// time and in this case it is scheduled using EDF. From there, it can either
+/// keep setting a new absolute deadline in the future, or return to the non
+/// real-time level by setting its priority to DEFAULT_PRIORITY to be scheduled
+/// again using round robin. Ready tasks with a deadline will always preempt non
+/// real-time threads whose priority is DEFAULT_PRIORITY
+const long long DEFAULT_PRIORITY=std::numeric_limits<long long>::max()-2;
 #endif
 
-/// Priority of main()
-/// The meaning of a thread's priority depends on the chosen scheduler.
-const unsigned char MAIN_PRIORITY=1;
-
-#ifdef SCHED_TYPE_PRIORITY
+#if defined(SCHED_TYPE_PRIORITY) || defined(SCHED_TYPE_EDF)
 /// Maximum thread time slice in nanoseconds, after which preemption occurs
 const unsigned int MAX_TIME_SLICE=1000000;
 #endif //SCHED_TYPE_PRIORITY
+
+/// \def OS_TIMER_MODEL_UNIFIED
+/// Replace the new 1+N high-resolution timing subsystem, also called separate
+/// timer model with the old high-resolution timing subsystem, called unified.
+/// This only makes sense for boards that have a low number of hardware timers,
+/// as the new timer model significantly improves the scheduler perofrmance, see
+/// the paper "Efficient Design of High-Resolution Timekeeping in Real-Time
+/// Operating Systems"
+//#define OS_TIMER_MODEL_UNIFIED
+
+/// Select the implementation of pthread_mutex_t. Three options:
+/// 1) pthreadMutexProtocolOverride=DYNAMIC;
+/// Allow the type of each pthread_mutex_t to be selected on a per-mutex basis
+/// with pthread_mutexattr_setprotocol(). This is the implementation POSIX
+/// intended, but it has considerable drawbacks:
+/// - POSIX does not allow to set the mutex protocol for statically allocated
+///   mutexes, only mutexes created with pthread_mutex_init can have inheritance
+/// - The C standard library and some other libraries such as OpenMP use
+///   mutexes without setting priority inheritance, thus real-time code can
+///   incur in priority inversion on those mutexes
+/// - There is no way to alter the protocol of C++ std::mutex, although it is
+///   implemented on top of pthread_mutex_t
+/// - there is a performance penalty in checking the mutex type at every
+///   lock/unlock
+/// 2) pthreadMutexProtocolOverride=FORCE_PRIO_INHERIT;
+/// All pthread_mutex_t, regardless of calls to pthread_mutexattr_setprotocol()
+/// are forced to use the priority inheritance implementation. Allows to avoid
+/// priority inversion also in the C standard library, using C++ mutexes and
+/// OpenMP. Implementation is also slightly faster due to not having to check
+/// the mutex type at every lock/unlock
+/// 3) pthreadMutexProtocolOverride=FORCE_PRIO_NONE;
+/// Backwards compatibility with the Miosix 2 behavior. All pthread_mutex_t do
+/// not enforce priority inheritance. The kernel still provides a mutex type
+/// with priority inheritance but it is the Miosix-specific claass Mutex.
+/// This option provides the fastest pthread_mutex_t implementation.
+enum class PthreadMutexProtocol { DYNAMIC, FORCE_PRIO_INHERIT, FORCE_PRIO_NONE };
+constexpr auto pthreadMutexProtocolOverride=PthreadMutexProtocol::DYNAMIC;
+
+/// Adding this definition changes the mutex types used by the kernel and device
+/// drivers (KernelMutex) to the priority inheritance type. Prevents priority
+/// inversion when accessing kernel code and device drivers at the cost of a
+/// slightly higher overhead
+//#define KERNEL_MUTEX_WITH_PRIORITY_INHERITANCE
+
+/// pthread_exit() is a dangerous function. To understand why, let's first
+/// discuss how Linux implements it. On the surface, it looks like it neatly
+/// works with C++ as it is implemented by throwing a special ForcedUnwind
+/// exception thus calling C++ destructors. However, implementers left a number
+/// of unhandled corner cases all leading to unexpected program termination.
+/// These are: calling pthread_exit() from code that directly or indirectly...
+/// 1) contains a catch(...) that does not rethrow? std::abort() gets called
+/// 2) contains a function declared noexcept? std::abort() gets called
+/// 3) is called from a destructor? you guessed it, std::abort() again!
+/// For this reason pthread_exit() support is by default disabled in Miosix and
+/// attempting to call this function is met with a linking error. If you really
+/// need it, uncomment the line below. Oh, right, how does Miosix implement it?
+/// Throwing a standard C++ exception, so a catch(...) can stop a pthread_exit()
+/// which is imho neither better nor worse than Linux.
+/// Reference: https://udrepper.livejournal.com/21541.html
+//#define WITH_PTHREAD_EXIT
+
+/// Enable support for pthread_key_create/pthread_key_delete/pthread_getspecific
+//#define WITH_PTHREAD_KEYS
+
+/// Maximum number of concurrently existing pthread keys
+const unsigned int MAX_PTHREAD_KEYS=2;
 
 
 //
@@ -262,14 +371,15 @@ const unsigned int WATERMARK_LEN=16;
 /// \internal Used to fill watermark
 const unsigned int WATERMARK_FILL=0xaaaaaaaa;
 
-/// \internal Used to fill stack (for checking stack usage)
+/// \internal Used to fill stack (for checking stack usage). Must be a single
+/// byte value repeated 4 times to fill a word
 const unsigned int STACK_FILL=0xbbbbbbbb;
 
 // Compiler version checks
-#if !defined(_MIOSIX_GCC_PATCH_MAJOR) || _MIOSIX_GCC_PATCH_MAJOR < 3
+#if !defined(_MIOSIX_GCC_PATCH_MAJOR) || (_MIOSIX_GCC_PATCH_MAJOR < 4)
 #error "You are using a too old or unsupported compiler. Get the latest one from https://miosix.org/wiki/index.php?title=Miosix_Toolchain"
 #endif
-#if _MIOSIX_GCC_PATCH_MAJOR > 3
+#if _MIOSIX_GCC_PATCH_MAJOR > 4
 #warning "You are using a too new compiler, which may not be supported"
 #endif
 

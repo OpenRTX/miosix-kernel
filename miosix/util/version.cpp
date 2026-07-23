@@ -25,7 +25,7 @@
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  ***************************************************************************/
 
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 
 // These two #if are here because version checking for config files in
 // out-of-git-tree projects has to be done somewhere.
@@ -53,7 +53,7 @@ namespace miosix {
 #define AU
 #endif
 
-const char AU ver[]="Miosix v2.81 (" _MIOSIX_BOARDNAME ", " __DATE__ " " __TIME__ CV ")";
+const char AU ver[]="Miosix v3.01 (" _MIOSIX_BOARDNAME ", " __DATE__ " " __TIME__ CV ")";
 
 const char *getMiosixVersion()
 {

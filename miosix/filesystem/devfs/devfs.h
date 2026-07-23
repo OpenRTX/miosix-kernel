@@ -31,7 +31,7 @@
 #include "filesystem/file.h"
 #include "filesystem/stringpart.h"
 #include "kernel/sync.h"
-#include "config/miosix_settings.h"
+#include "miosix_settings.h"
 
 namespace miosix {
 
@@ -138,8 +138,7 @@ public:
      * which is used by the kernel on console devices to write debug information
      * before the kernel is started or in case of serious errors, right before
      * rebooting.
-     * Can ONLY be called when the kernel is not yet started, paused or within
-     * an interrupt. This default implementation ignores writes.
+     * This default implementation ignores writes.
      * \param str the string to write. The string must be NUL terminated.
      */
     virtual void IRQwrite(const char *str);
@@ -269,7 +268,7 @@ public:
     
 private:
     
-    FastMutex mutex;
+    KernelMutex mutex;
     std::map<StringPart,intrusive_ref_ptr<Device> > files;
     int inodeCount;
     static const int rootDirInode=1;

@@ -1,0 +1,585 @@
+From 52e88241d87199ee364f3ac0408bb6ef0438f4e9 Mon Sep 17 00:00:00 2001
+From: Alberto Nidasio <alberto.nidasio@skywarder.eu>
+Date: Thu, 19 Dec 2024 11:39:53 +0100
+Subject: [PATCH 392/392] Implemented `single-pic-base`
+
+---
+ clang/include/clang/Basic/LangOptions.def     |  1 +
+ clang/include/clang/Driver/Options.td         |  9 +++++--
+ clang/lib/Driver/ToolChains/CommonArgs.cpp    | 25 +++++++++++++++----
+ clang/tools/driver/cc1as_main.cpp             |  2 +-
+ flang/lib/Frontend/CompilerInvocation.cpp     |  1 +
+ lld/ELF/Arch/ARM.cpp                          |  2 ++
+ lld/ELF/Config.h                              |  2 +-
+ lld/ELF/Driver.cpp                            |  2 ++
+ lld/ELF/InputSection.cpp                      |  3 +++
+ lld/ELF/Relocations.cpp                       |  1 +
+ lld/ELF/Relocations.h                         |  1 +
+ llvm/include/llvm/MC/MCExpr.h                 |  1 +
+ llvm/include/llvm/Support/CodeGen.h           |  2 +-
+ llvm/lib/CodeGen/CommandFlags.cpp             |  4 ++-
+ llvm/lib/MC/MCExpr.cpp                        |  2 ++
+ llvm/lib/Target/ARM/ARMAsmPrinter.cpp         | 22 +++++++++-------
+ llvm/lib/Target/ARM/ARMBaseInstrInfo.cpp      |  9 ++++---
+ llvm/lib/Target/ARM/ARMConstantPoolValue.cpp  |  2 ++
+ llvm/lib/Target/ARM/ARMConstantPoolValue.h    |  1 +
+ llvm/lib/Target/ARM/ARMExpandPseudoInsts.cpp  | 11 +++++---
+ llvm/lib/Target/ARM/ARMISelLowering.cpp       | 25 +++++++++++++++++--
+ .../lib/Target/ARM/ARMInstructionSelector.cpp |  6 ++++-
+ llvm/lib/Target/ARM/ARMSubtarget.cpp          |  5 +++-
+ llvm/lib/Target/ARM/ARMSubtarget.h            |  1 +
+ .../lib/Target/ARM/MCTargetDesc/ARMBaseInfo.h |  9 ++++---
+ .../ARM/MCTargetDesc/ARMELFObjectWriter.cpp   |  4 +++
+ llvm/lib/Target/TargetMachine.cpp             |  2 +-
+ 27 files changed, 120 insertions(+), 35 deletions(-)
+
+diff --git a/clang/include/clang/Basic/LangOptions.def b/clang/include/clang/Basic/LangOptions.def
+index 4942dcaa086e..f4e5f6302a73 100644
+--- a/clang/include/clang/Basic/LangOptions.def
++++ b/clang/include/clang/Basic/LangOptions.def
+@@ -206,6 +206,7 @@ COMPATIBLE_VALUE_LANGOPT(PICLevel    , 2, 0, "__PIC__ level")
+ COMPATIBLE_VALUE_LANGOPT(PIE         , 1, 0, "is pie")
+ LANGOPT(ROPI                         , 1, 0, "Read-only position independence")
+ LANGOPT(RWPI                         , 1, 0, "Read-write position independence")
++LANGOPT(SINGLE_PIC_BASE              , 1, 0, "R9 points to the base of the data segment")
+ COMPATIBLE_LANGOPT(GNUInline         , 1, 0, "GNU inline semantics")
+ COMPATIBLE_LANGOPT(NoInlineDefine    , 1, 0, "__NO_INLINE__ predefined macro")
+ COMPATIBLE_LANGOPT(Deprecated        , 1, 0, "__DEPRECATED predefined macro")
+diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+index 175bedbfb4d0..a7b0683a28d8 100644
+--- a/clang/include/clang/Driver/Options.td
++++ b/clang/include/clang/Driver/Options.td
+@@ -3560,6 +3560,11 @@ defm rwpi : BoolFOption<"rwpi",
+   PosFlag<SetTrue, [], [ClangOption, FlangOption, CC1Option],
+           "Generate read-write position independent code (ARM only)">,
+   NegFlag<SetFalse, [], [ClangOption, FlangOption, CC1Option]>>;
++defm single_pic_base : BoolOption<"m", "single-pic-base",
++  LangOpts<"SINGLE_PIC_BASE">, DefaultFalse,
++  PosFlag<SetTrue, [], [ClangOption, FlangOption, CC1Option],
++          "Reserves R9 as GOT base address (ARM only)">,
++  NegFlag<SetFalse, [], [ClangOption, FlangOption, CC1Option]>>;
+ def fplugin_EQ : Joined<["-"], "fplugin=">, Group<f_Group>,
+   Flags<[NoXarchOption]>, MetaVarName<"<dsopath>">,
+   HelpText<"Load the named plugin (dynamic shared object)">;
+@@ -6750,9 +6755,9 @@ def migrator_no_finalize_removal : Flag<["-"], "no-finalize-removal">,
+ let Visibility = [CC1Option, CC1AsOption, FC1Option] in {
+ 
+ def mrelocation_model : Separate<["-"], "mrelocation-model">,
+-  HelpText<"The relocation model to use">, Values<"static,pic,ropi,rwpi,ropi-rwpi,dynamic-no-pic">,
++  HelpText<"The relocation model to use">, Values<"static,pic,ropi,rwpi,ropi-rwpi,dynamic-no-pic,single-pic-base">,
+   NormalizedValuesScope<"llvm::Reloc">,
+-  NormalizedValues<["Static", "PIC_", "ROPI", "RWPI", "ROPI_RWPI", "DynamicNoPIC"]>,
++  NormalizedValues<["Static", "PIC_", "ROPI", "RWPI", "ROPI_RWPI", "DynamicNoPIC", "SINGLE_PIC_BASE"]>,
+   MarshallingInfoEnum<CodeGenOpts<"RelocationModel">, "PIC_">;
+ def debug_info_kind_EQ : Joined<["-"], "debug-info-kind=">;
+ 
+diff --git a/clang/lib/Driver/ToolChains/CommonArgs.cpp b/clang/lib/Driver/ToolChains/CommonArgs.cpp
+index 2b916f000336..8822fc3b2e77 100644
+--- a/clang/lib/Driver/ToolChains/CommonArgs.cpp
++++ b/clang/lib/Driver/ToolChains/CommonArgs.cpp
+@@ -1760,6 +1760,8 @@ const char *tools::RelocationModelName(llvm::Reloc::Model Model) {
+     return "rwpi";
+   case llvm::Reloc::ROPI_RWPI:
+     return "ropi-rwpi";
++  case llvm::Reloc::SINGLE_PIC_BASE:
++    return "single-pic-base";
+   }
+   llvm_unreachable("Unknown Reloc::Model kind");
+ }
+@@ -1940,8 +1942,17 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
+     RWPI = true;
+   }
+ 
+-  // ROPI and RWPI are not compatible with PIC or PIE.
+-  if ((ROPI || RWPI) && (PIC || PIE))
++  bool SINGLE_PIC_BASE = false;
++  Arg* LastSINGLE_PIC_BASEArg = Args.getLastArg(options::OPT_msingle_pic_base, options::OPT_mno_single_pic_base);
++  if (LastSINGLE_PIC_BASEArg && LastSINGLE_PIC_BASEArg->getOption().matches(options::OPT_msingle_pic_base)) {
++    if (!EmbeddedPISupported)
++        ToolChain.getDriver().Diag(diag::err_drv_unsupported_opt_for_target)
++            << LastRWPIArg->getSpelling() << Triple.str();
++    SINGLE_PIC_BASE = true;
++  }
++
++  // ROPI and RWPI are not compatible with PIC, PIE or SINLE_PIC_BASE.
++  if ((ROPI || RWPI) && (PIC || PIE || SINGLE_PIC_BASE))
+     ToolChain.getDriver().Diag(diag::err_drv_ropi_rwpi_incompatible_with_pic);
+ 
+   if (Triple.isMIPS()) {
+@@ -1961,10 +1972,14 @@ tools::ParsePICArgs(const ToolChain &ToolChain, const ArgList &Args) {
+     IsPICLevelTwo = false;
+   }
+ 
+-  if (PIC)
+-    return std::make_tuple(llvm::Reloc::PIC_, IsPICLevelTwo ? 2U : 1U, PIE);
+-
+   llvm::Reloc::Model RelocM = llvm::Reloc::Static;
++  if (SINGLE_PIC_BASE || PIC) {
++    if (SINGLE_PIC_BASE)
++      RelocM = llvm::Reloc::SINGLE_PIC_BASE;
++    else if (PIC)
++      RelocM = llvm::Reloc::PIC_;
++    return std::make_tuple(RelocM, IsPICLevelTwo ? 2U : 1U, PIE);
++  }
+   if (ROPI && RWPI)
+     RelocM = llvm::Reloc::ROPI_RWPI;
+   else if (ROPI)
+diff --git a/clang/tools/driver/cc1as_main.cpp b/clang/tools/driver/cc1as_main.cpp
+index bc398fa0731f..4f3e144a5ac6 100644
+--- a/clang/tools/driver/cc1as_main.cpp
++++ b/clang/tools/driver/cc1as_main.cpp
+@@ -447,7 +447,7 @@ static bool ExecuteAssemblerImpl(AssemblerInvocation &Opts,
+   bool PIC = false;
+   if (Opts.RelocationModel == "static") {
+     PIC = false;
+-  } else if (Opts.RelocationModel == "pic") {
++  } else if (Opts.RelocationModel == "pic" || Opts.RelocationModel == "single-pic-base") {
+     PIC = true;
+   } else {
+     assert(Opts.RelocationModel == "dynamic-no-pic" &&
+diff --git a/flang/lib/Frontend/CompilerInvocation.cpp b/flang/lib/Frontend/CompilerInvocation.cpp
+index a3c41fb4611f..135d1a5e1a05 100644
+--- a/flang/lib/Frontend/CompilerInvocation.cpp
++++ b/flang/lib/Frontend/CompilerInvocation.cpp
+@@ -356,6 +356,7 @@ static void parseCodeGenArgs(Fortran::frontend::CodeGenOptions &opts,
+             .Case("ropi", llvm::Reloc::ROPI)
+             .Case("rwpi", llvm::Reloc::RWPI)
+             .Case("ropi-rwpi", llvm::Reloc::ROPI_RWPI)
++            .Case("single-pic-base", llvm::Reloc::SINGLE_PIC_BASE)
+             .Default(std::nullopt);
+     if (relocModel.has_value())
+       opts.setRelocationModel(*relocModel);
+diff --git a/lld/ELF/Arch/ARM.cpp b/lld/ELF/Arch/ARM.cpp
+index 687f9499009d..4ab6f18f43c7 100644
+--- a/lld/ELF/Arch/ARM.cpp
++++ b/lld/ELF/Arch/ARM.cpp
+@@ -140,6 +140,8 @@ RelExpr ARM::getRelExpr(RelType type, const Symbol &s,
+       return R_PC;
+     if (config->target2 == Target2Policy::Abs)
+       return R_ABS;
++    if (config->target2 == Target2Policy::MxAbs)
++      return R_MX_ABS;
+     return R_GOT_PC;
+   case R_ARM_TLS_GD32:
+     return R_TLSGD_PC;
+diff --git a/lld/ELF/Config.h b/lld/ELF/Config.h
+index 607420eaa51e..6afe74e0a84d 100644
+--- a/lld/ELF/Config.h
++++ b/lld/ELF/Config.h
+@@ -88,7 +88,7 @@ enum class SortSectionPolicy {
+ };
+ 
+ // For --target2
+-enum class Target2Policy { Abs, Rel, GotRel };
++enum class Target2Policy { Abs, Rel, GotRel, MxAbs };
+ 
+ // For tracking ARM Float Argument PCS
+ enum class ARMVFPArgKind { Default, Base, VFP, ToolChain };
+diff --git a/lld/ELF/Driver.cpp b/lld/ELF/Driver.cpp
+index 0b1b7fd65eb6..524aa6faa839 100644
+--- a/lld/ELF/Driver.cpp
++++ b/lld/ELF/Driver.cpp
+@@ -730,6 +730,8 @@ static Target2Policy getTarget2(opt::InputArgList &args) {
+     return Target2Policy::Rel;
+   if (s == "abs")
+     return Target2Policy::Abs;
++  if (s == "mx-data-rel")
++    return Target2Policy::MxAbs;
+   if (s == "got-rel")
+     return Target2Policy::GotRel;
+   error("unknown --target2 option: " + s);
+diff --git a/lld/ELF/InputSection.cpp b/lld/ELF/InputSection.cpp
+index e033a715b592..05329b2f57e9 100644
+--- a/lld/ELF/InputSection.cpp
++++ b/lld/ELF/InputSection.cpp
+@@ -677,6 +677,9 @@ uint64_t InputSectionBase::getRelocTargetVA(const InputFile *file, RelType type,
+   case R_RISCV_ADD:
+   case R_RISCV_LEB128:
+     return sym.getVA(a);
++  case R_MX_ABS:
++    // Do not leave relocations behind and subtract DATA_BASE
++    return sym.getVA(a) - sym.getGotVA();
+   case R_ADDEND:
+     return a;
+   case R_RELAX_HINT:
+diff --git a/lld/ELF/Relocations.cpp b/lld/ELF/Relocations.cpp
+index 92a1b9baaca3..33041e5ad0d1 100644
+--- a/lld/ELF/Relocations.cpp
++++ b/lld/ELF/Relocations.cpp
+@@ -233,6 +233,7 @@ static RelExpr toPlt(RelExpr expr) {
+   case R_PC:
+     return R_PLT_PC;
+   case R_ABS:
++  case R_MX_ABS: // ?
+     return R_PLT;
+   case R_GOTREL:
+     return R_PLT_GOTREL;
+diff --git a/lld/ELF/Relocations.h b/lld/ELF/Relocations.h
+index 7eb8a811e693..3bd18c1d8494 100644
+--- a/lld/ELF/Relocations.h
++++ b/lld/ELF/Relocations.h
+@@ -97,6 +97,7 @@ enum RelExpr {
+   R_MIPS_GOT_OFF32,
+   R_MIPS_TLSGD,
+   R_MIPS_TLSLD,
++  R_MX_ABS,
+   R_PPC32_PLTREL,
+   R_PPC64_CALL,
+   R_PPC64_CALL_PLT,
+diff --git a/llvm/include/llvm/MC/MCExpr.h b/llvm/include/llvm/MC/MCExpr.h
+index 67836292874f..50589db0b6eb 100644
+--- a/llvm/include/llvm/MC/MCExpr.h
++++ b/llvm/include/llvm/MC/MCExpr.h
+@@ -229,6 +229,7 @@ public:
+ 
+     VK_ARM_NONE,
+     VK_ARM_GOT_PREL,
++    VK_ARM_GOT_BREL,
+     VK_ARM_TARGET1,
+     VK_ARM_TARGET2,
+     VK_ARM_PREL31,
+diff --git a/llvm/include/llvm/Support/CodeGen.h b/llvm/include/llvm/Support/CodeGen.h
+index 46f99811763a..089770f7f7e0 100644
+--- a/llvm/include/llvm/Support/CodeGen.h
++++ b/llvm/include/llvm/Support/CodeGen.h
+@@ -22,7 +22,7 @@ namespace llvm {
+   // Relocation model types.
+   namespace Reloc {
+     // Cannot be named PIC due to collision with -DPIC
+-    enum Model { Static, PIC_, DynamicNoPIC, ROPI, RWPI, ROPI_RWPI };
++    enum Model { Static, PIC_, DynamicNoPIC, ROPI, RWPI, ROPI_RWPI, SINGLE_PIC_BASE };
+   }
+ 
+   // Code model types.
+diff --git a/llvm/lib/CodeGen/CommandFlags.cpp b/llvm/lib/CodeGen/CommandFlags.cpp
+index 51406fb287e6..1a658786b843 100644
+--- a/llvm/lib/CodeGen/CommandFlags.cpp
++++ b/llvm/lib/CodeGen/CommandFlags.cpp
+@@ -146,7 +146,9 @@ codegen::RegisterCodeGenFlags::RegisterCodeGenFlags() {
+               Reloc::RWPI, "rwpi",
+               "Read-write data relocatable, accessed relative to static base"),
+           clEnumValN(Reloc::ROPI_RWPI, "ropi-rwpi",
+-                     "Combination of ropi and rwpi")));
++                     "Combination of ropi and rwpi"),
++          clEnumValN(Reloc::SINGLE_PIC_BASE, "single-pic-base",
++                     "R9 points to the base of the data segment")));
+   CGBINDOPT(RelocModel);
+ 
+   static cl::opt<ThreadModel::Model> ThreadModel(
+diff --git a/llvm/lib/MC/MCExpr.cpp b/llvm/lib/MC/MCExpr.cpp
+index 80def6dfc24b..daf6c07c91be 100644
+--- a/llvm/lib/MC/MCExpr.cpp
++++ b/llvm/lib/MC/MCExpr.cpp
+@@ -257,6 +257,7 @@ StringRef MCSymbolRefExpr::getVariantKindName(VariantKind Kind) {
+   case VK_X86_PLTOFF: return "PLTOFF";
+   case VK_ARM_NONE: return "none";
+   case VK_ARM_GOT_PREL: return "GOT_PREL";
++  case VK_ARM_GOT_BREL: return "GOT_BREL";
+   case VK_ARM_TARGET1: return "target1";
+   case VK_ARM_TARGET2: return "target2";
+   case VK_ARM_PREL31: return "prel31";
+@@ -495,6 +496,7 @@ MCSymbolRefExpr::getVariantKindForName(StringRef Name) {
+     .Case("ldplt", VK_Hexagon_LD_PLT)
+     .Case("none", VK_ARM_NONE)
+     .Case("got_prel", VK_ARM_GOT_PREL)
++    .Case("got_brel", VK_ARM_GOT_BREL)
+     .Case("target1", VK_ARM_TARGET1)
+     .Case("target2", VK_ARM_TARGET2)
+     .Case("prel31", VK_ARM_PREL31)
+diff --git a/llvm/lib/Target/ARM/ARMAsmPrinter.cpp b/llvm/lib/Target/ARM/ARMAsmPrinter.cpp
+index 15cda9b9432d..ecf5fe082bbd 100644
+--- a/llvm/lib/Target/ARM/ARMAsmPrinter.cpp
++++ b/llvm/lib/Target/ARM/ARMAsmPrinter.cpp
+@@ -806,15 +806,17 @@ void ARMAsmPrinter::emitAttributes() {
+   }
+ 
+   // We currently do not support using R9 as the TLS pointer.
+-  if (STI.isRWPI())
+-    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
+-                      ARMBuildAttrs::R9IsSB);
+-  else if (STI.isR9Reserved())
+-    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
+-                      ARMBuildAttrs::R9Reserved);
+-  else
+-    ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
+-                      ARMBuildAttrs::R9IsGPR);
++  if (!STI.isSinglePicBase()) {
++    if (STI.isRWPI())
++      ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
++                        ARMBuildAttrs::R9IsSB);
++    else if (STI.isR9Reserved())
++      ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
++                        ARMBuildAttrs::R9Reserved);
++    else
++      ATS.emitAttribute(ARMBuildAttrs::ABI_PCS_R9_use,
++                        ARMBuildAttrs::R9IsGPR);
++  }
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -850,6 +852,8 @@ getModifierVariantKind(ARMCP::ARMCPModifier Modifier) {
+     return MCSymbolRefExpr::VK_ARM_SBREL;
+   case ARMCP::GOT_PREL:
+     return MCSymbolRefExpr::VK_ARM_GOT_PREL;
++  case ARMCP::GOT_BREL:
++    return MCSymbolRefExpr::VK_ARM_GOT_BREL;
+   case ARMCP::SECREL:
+     return MCSymbolRefExpr::VK_SECREL;
+   }
+diff --git a/llvm/lib/Target/ARM/ARMBaseInstrInfo.cpp b/llvm/lib/Target/ARM/ARMBaseInstrInfo.cpp
+index 4bf65be6f102..d7c4d85ac008 100644
+--- a/llvm/lib/Target/ARM/ARMBaseInstrInfo.cpp
++++ b/llvm/lib/Target/ARM/ARMBaseInstrInfo.cpp
+@@ -4912,8 +4912,8 @@ bool ARMBaseInstrInfo::verifyInstruction(const MachineInstr &MI,
+ void ARMBaseInstrInfo::expandLoadStackGuardBase(MachineBasicBlock::iterator MI,
+                                                 unsigned LoadImmOpc,
+                                                 unsigned LoadOpc) const {
+-  assert(!Subtarget.isROPI() && !Subtarget.isRWPI() &&
+-         "ROPI/RWPI not currently supported with stack guard");
++  assert(!Subtarget.isROPI() && !Subtarget.isRWPI() && !Subtarget.isSinglePicBase() &&
++         "ROPI/RWPI/SINGLE_PIC_BASE not currently supported with stack guard");
+ 
+   MachineBasicBlock &MBB = *MI->getParent();
+   DebugLoc DL = MI->getDebugLoc();
+@@ -4961,7 +4961,7 @@ void ARMBaseInstrInfo::expandLoadStackGuardBase(MachineBasicBlock::iterator MI,
+       else if (IsIndirect)
+         TargetFlags |= ARMII::MO_COFFSTUB;
+     } else if (IsIndirect) {
+-      TargetFlags |= ARMII::MO_GOT;
++      TargetFlags |= ARMII::MO_GOT_PREL;
+     }
+ 
+     if (LoadImmOpc == ARM::tMOVi32imm) { // Thumb-1 execute-only
+@@ -5549,7 +5549,8 @@ ARMBaseInstrInfo::getSerializableBitmaskMachineOperandTargetFlags() const {
+ 
+   static const std::pair<unsigned, const char *> TargetFlags[] = {
+       {MO_COFFSTUB, "arm-coffstub"},
+-      {MO_GOT, "arm-got"},
++      {MO_GOT_PREL, "arm-got"},
++      {MO_GOT_BREL, "arm-got-brel"},
+       {MO_SBREL, "arm-sbrel"},
+       {MO_DLLIMPORT, "arm-dllimport"},
+       {MO_SECREL, "arm-secrel"},
+diff --git a/llvm/lib/Target/ARM/ARMConstantPoolValue.cpp b/llvm/lib/Target/ARM/ARMConstantPoolValue.cpp
+index c1df7ef43cad..f5c9a6f5081d 100644
+--- a/llvm/lib/Target/ARM/ARMConstantPoolValue.cpp
++++ b/llvm/lib/Target/ARM/ARMConstantPoolValue.cpp
+@@ -60,6 +60,8 @@ StringRef ARMConstantPoolValue::getModifierText() const {
+     return "tlsgd";
+   case ARMCP::GOT_PREL:
+     return "GOT_PREL";
++  case ARMCP::GOT_BREL:
++    return "GOT_BREL";
+   case ARMCP::GOTTPOFF:
+     return "gottpoff";
+   case ARMCP::TPOFF:
+diff --git a/llvm/lib/Target/ARM/ARMConstantPoolValue.h b/llvm/lib/Target/ARM/ARMConstantPoolValue.h
+index 261070a74ba3..0829334fc75e 100644
+--- a/llvm/lib/Target/ARM/ARMConstantPoolValue.h
++++ b/llvm/lib/Target/ARM/ARMConstantPoolValue.h
+@@ -47,6 +47,7 @@ namespace ARMCP {
+     no_modifier, /// None
+     TLSGD,       /// Thread Local Storage (General Dynamic Mode)
+     GOT_PREL,    /// Global Offset Table, PC Relative
++    GOT_BREL,    /// Global Offset Table, Base Relative
+     GOTTPOFF,    /// Global Offset Table, Thread Pointer Offset
+     TPOFF,       /// Thread Pointer Offset
+     SECREL,      /// Section Relative (Windows TLS)
+diff --git a/llvm/lib/Target/ARM/ARMExpandPseudoInsts.cpp b/llvm/lib/Target/ARM/ARMExpandPseudoInsts.cpp
+index 2f9236bb977f..3512f5030149 100644
+--- a/llvm/lib/Target/ARM/ARMExpandPseudoInsts.cpp
++++ b/llvm/lib/Target/ARM/ARMExpandPseudoInsts.cpp
+@@ -20,6 +20,7 @@
+ #include "ARMMachineFunctionInfo.h"
+ #include "ARMSubtarget.h"
+ #include "MCTargetDesc/ARMAddressingModes.h"
++#include "MCTargetDesc/ARMBaseInfo.h"
+ #include "llvm/CodeGen/LivePhysRegs.h"
+ #include "llvm/CodeGen/MachineFrameInfo.h"
+ #include "llvm/CodeGen/MachineFunctionPass.h"
+@@ -2649,9 +2650,13 @@ bool ARMExpandPseudo::ExpandMI(MachineBasicBlock &MBB,
+ 
+       if (IsPIC) {
+         unsigned PCAdj = IsARM ? 8 : 4;
+-        auto Modifier = (Flags & ARMII::MO_GOT)
+-                            ? ARMCP::GOT_PREL
+-                            : ARMCP::no_modifier;
++
++        auto Modifier = ARMCP::no_modifier;
++        if (Flags & ARMII::MO_GOT_PREL) {
++          Modifier = ARMCP::GOT_PREL;
++        } else if (Flags & ARMII::MO_GOT_BREL) {
++          Modifier = ARMCP::GOT_BREL;
++        }
+         ARMPCLabelIndex = AFI->createPICLabelUId();
+         CPV = ARMConstantPoolConstant::Create(
+             GV, ARMPCLabelIndex, ARMCP::CPValue, PCAdj, Modifier,
+diff --git a/llvm/lib/Target/ARM/ARMISelLowering.cpp b/llvm/lib/Target/ARM/ARMISelLowering.cpp
+index 23852cf4979f..730bc8bd5c28 100644
+--- a/llvm/lib/Target/ARM/ARMISelLowering.cpp
++++ b/llvm/lib/Target/ARM/ARMISelLowering.cpp
+@@ -3918,6 +3918,7 @@ SDValue ARMTargetLowering::LowerGlobalAddress(SDValue Op,
+ 
+ SDValue ARMTargetLowering::LowerGlobalAddressELF(SDValue Op,
+                                                  SelectionDAG &DAG) const {
++  // DAG.setGraphColor(Op.getNode(), "green");
+   EVT PtrVT = getPointerTy(DAG.getDataLayout());
+   SDLoc dl(Op);
+   const GlobalValue *GV = cast<GlobalAddressSDNode>(Op)->getGlobal();
+@@ -3929,10 +3930,30 @@ SDValue ARMTargetLowering::LowerGlobalAddressELF(SDValue Op,
+     if (SDValue V = promoteToConstantPool(this, GV, DAG, PtrVT, dl))
+       return V;
+ 
+-  if (isPositionIndependent()) {
++  if (Subtarget->isSinglePicBase()) {
++    bool UseGOT_BREL = !isa<Function>(GV);
++    SDValue G = DAG.getTargetGlobalAddress(GV, dl, PtrVT, 0, UseGOT_BREL ? ARMII::MO_GOT_BREL : 0);
++
++    if (UseGOT_BREL) {
++      ARMConstantPoolValue *CPV = ARMConstantPoolConstant::Create(GV, ARMCP::GOT_BREL);
++      SDValue G_const = DAG.getTargetConstantPool(CPV, PtrVT, Align(4));
++      SDValue G_wrapped = DAG.getNode(ARMISD::Wrapper, dl, MVT::i32, G_const);
++      SDValue G_wrapped_loaded = DAG.getLoad(PtrVT, dl, DAG.getEntryNode(), G_wrapped, MachinePointerInfo::getConstantPool(DAG.getMachineFunction()));
++
++      SDValue r9 = DAG.getCopyFromReg(DAG.getEntryNode(), dl, ARM::R9, PtrVT);
++      SDValue got_entry_address = DAG.getNode(ISD::ADD, dl, PtrVT, r9, G_wrapped_loaded);
++      SDValue our_address = DAG.getLoad(PtrVT, dl, DAG.getEntryNode(), got_entry_address,
++                                        MachinePointerInfo::getGOT(DAG.getMachineFunction()));
++
++      return our_address;
++    } else {
++      outs() << "Using ARMISD::WrapperPIC for " << GV->getName() << "\n";
++      return DAG.getNode(ARMISD::WrapperPIC, dl, PtrVT, G);
++    }
++  } else if (isPositionIndependent()) {
+     bool UseGOT_PREL = !TM.shouldAssumeDSOLocal(*GV->getParent(), GV);
+     SDValue G = DAG.getTargetGlobalAddress(GV, dl, PtrVT, 0,
+-                                           UseGOT_PREL ? ARMII::MO_GOT : 0);
++                                           UseGOT_PREL ? ARMII::MO_GOT_PREL : 0);
+     SDValue Result = DAG.getNode(ARMISD::WrapperPIC, dl, PtrVT, G);
+     if (UseGOT_PREL)
+       Result =
+diff --git a/llvm/lib/Target/ARM/ARMInstructionSelector.cpp b/llvm/lib/Target/ARM/ARMInstructionSelector.cpp
+index f391058a7051..f1160fadda83 100644
+--- a/llvm/lib/Target/ARM/ARMInstructionSelector.cpp
++++ b/llvm/lib/Target/ARM/ARMInstructionSelector.cpp
+@@ -608,6 +608,10 @@ bool ARMInstructionSelector::insertComparison(CmpConstants Helper, InsertInfo I,
+ 
+ bool ARMInstructionSelector::selectGlobal(MachineInstrBuilder &MIB,
+                                           MachineRegisterInfo &MRI) const {
++  if (STI.isSinglePicBase()) {
++    LLVM_DEBUG(dbgs() << "SINGLE_PIC_BASE not supported yet\n");
++    return false;
++  }
+   if ((STI.isROPI() || STI.isRWPI()) && !STI.isTargetELF()) {
+     LLVM_DEBUG(dbgs() << "ROPI and RWPI only supported for ELF\n");
+     return false;
+@@ -680,7 +684,7 @@ bool ARMInstructionSelector::selectGlobal(MachineInstrBuilder &MIB,
+     if (STI.isTargetDarwin())
+       TargetFlags |= ARMII::MO_NONLAZY;
+     if (STI.isGVInGOT(GV))
+-      TargetFlags |= ARMII::MO_GOT;
++      TargetFlags |= ARMII::MO_GOT_PREL;
+     MIB->getOperand(1).setTargetFlags(TargetFlags);
+ 
+     if (Indirect) {
+diff --git a/llvm/lib/Target/ARM/ARMSubtarget.cpp b/llvm/lib/Target/ARM/ARMSubtarget.cpp
+index 922fa93226f2..1180fde82a57 100644
+--- a/llvm/lib/Target/ARM/ARMSubtarget.cpp
++++ b/llvm/lib/Target/ARM/ARMSubtarget.cpp
+@@ -248,7 +248,7 @@ void ARMSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
+       (Options.UnsafeFPMath || isTargetDarwin()))
+     HasNEONForFP = true;
+ 
+-  if (isRWPI())
++  if (isRWPI() || isSinglePicBase())
+     ReserveR9 = true;
+ 
+   // If MVEVectorCostFactor is still 0 (has not been set to anything else), default it to 2
+@@ -350,6 +350,9 @@ bool ARMSubtarget::isRWPI() const {
+   return TM.getRelocationModel() == Reloc::RWPI ||
+          TM.getRelocationModel() == Reloc::ROPI_RWPI;
+ }
++bool ARMSubtarget::isSinglePicBase() const {
++  return TM.getRelocationModel() == Reloc::SINGLE_PIC_BASE;
++}
+ 
+ bool ARMSubtarget::isGVIndirectSymbol(const GlobalValue *GV) const {
+   if (!TM.shouldAssumeDSOLocal(*GV->getParent(), GV))
+diff --git a/llvm/lib/Target/ARM/ARMSubtarget.h b/llvm/lib/Target/ARM/ARMSubtarget.h
+index 91f3978b041a..41810bed347a 100644
+--- a/llvm/lib/Target/ARM/ARMSubtarget.h
++++ b/llvm/lib/Target/ARM/ARMSubtarget.h
+@@ -419,6 +419,7 @@ public:
+ 
+   bool isROPI() const;
+   bool isRWPI() const;
++  bool isSinglePicBase() const;
+ 
+   bool useMachineScheduler() const { return UseMISched; }
+   bool useMachinePipeliner() const { return UseMIPipeliner; }
+diff --git a/llvm/lib/Target/ARM/MCTargetDesc/ARMBaseInfo.h b/llvm/lib/Target/ARM/MCTargetDesc/ARMBaseInfo.h
+index 1e87085d7bf0..e0f5c989be86 100644
+--- a/llvm/lib/Target/ARM/MCTargetDesc/ARMBaseInfo.h
++++ b/llvm/lib/Target/ARM/MCTargetDesc/ARMBaseInfo.h
+@@ -262,8 +262,8 @@ namespace ARMII {
+     /// stub symbols on windows.
+     MO_COFFSTUB = 0x4,
+ 
+-    /// MO_GOT - On a symbol operand, this represents a GOT relative relocation.
+-    MO_GOT = 0x8,
++    /// MO_GOT_PREL - On a symbol operand, this represents a GOT relocation relative to the PC.
++    MO_GOT_PREL = 0x8,
+ 
+     /// MO_SBREL - On a symbol operand, this represents a static base relative
+     /// relocation. Used in movw and movt instructions.
+@@ -307,7 +307,10 @@ namespace ARMII {
+     /// containing
+     /// bits 24 through 31 of the address. Used only with Thumb1 MOV and ADD
+     // instructions.
+-    MO_HI_8_15 = 0x800
++    MO_HI_8_15 = 0x800,
++
++    /// MO_GOT_BREL - On a symbol operand, this represents a GOT relocation relative to the base of the GOT.
++    MO_GOT_BREL = 0x1000,
+   };
+ 
+   enum {
+diff --git a/llvm/lib/Target/ARM/MCTargetDesc/ARMELFObjectWriter.cpp b/llvm/lib/Target/ARM/MCTargetDesc/ARMELFObjectWriter.cpp
+index 44695a86c4e3..dabd9463f973 100644
+--- a/llvm/lib/Target/ARM/MCTargetDesc/ARMELFObjectWriter.cpp
++++ b/llvm/lib/Target/ARM/MCTargetDesc/ARMELFObjectWriter.cpp
+@@ -109,6 +109,8 @@ unsigned ARMELFObjectWriter::GetRelocTypeInner(const MCValue &Target,
+         return ELF::R_ARM_TLS_IE32;
+       case MCSymbolRefExpr::VK_ARM_GOT_PREL:
+         return ELF::R_ARM_GOT_PREL;
++      case MCSymbolRefExpr::VK_ARM_GOT_BREL:
++        return ELF::R_ARM_GOT_BREL;
+       case MCSymbolRefExpr::VK_ARM_PREL31:
+         return ELF::R_ARM_PREL31;
+       }
+@@ -222,6 +224,8 @@ unsigned ARMELFObjectWriter::GetRelocTypeInner(const MCValue &Target,
+       return ELF::R_ARM_GOTOFF32;
+     case MCSymbolRefExpr::VK_ARM_GOT_PREL:
+       return ELF::R_ARM_GOT_PREL;
++    case MCSymbolRefExpr::VK_ARM_GOT_BREL:
++      return ELF::R_ARM_GOT_BREL;
+     case MCSymbolRefExpr::VK_ARM_TARGET1:
+       return ELF::R_ARM_TARGET1;
+     case MCSymbolRefExpr::VK_ARM_TARGET2:
+diff --git a/llvm/lib/Target/TargetMachine.cpp b/llvm/lib/Target/TargetMachine.cpp
+index 0839fb22d35a..cc6f4e531b9b 100644
+--- a/llvm/lib/Target/TargetMachine.cpp
++++ b/llvm/lib/Target/TargetMachine.cpp
+@@ -94,7 +94,7 @@ bool TargetMachine::isLargeGlobalValue(const GlobalValue *GVal) const {
+ }
+ 
+ bool TargetMachine::isPositionIndependent() const {
+-  return getRelocationModel() == Reloc::PIC_;
++  return getRelocationModel() == Reloc::PIC_ || getRelocationModel() == Reloc::SINGLE_PIC_BASE;
+ }
+ 
+ /// Reset the target options based on the function's attributes.
+-- 
+2.39.2 (Apple Git-143)
+

@@ -37,10 +37,13 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <limits.h>
+#include <spawn.h>
 
 #include "sync.h"
 #include "process_pool.h"
 #include "process.h"
+#include "interfaces/cpu_const.h"
+#include "interfaces_private/userspace.h"
 
 using namespace std;
 
@@ -86,40 +89,75 @@ static int validateStringArray(MPUConfiguration& mpu, char* const* a)
 }
 
 /**
+ * Struct used by posix_spawn to pass all syscall arguments
+ */
+struct SpawnArgs
+{
+    const char *path;
+    const posix_spawn_file_actions_t *actions;
+    const posix_spawnattr_t *attr;
+    char *const *argv;
+    char *const *envp;
+};
+
+/**
  * This class contains information on all the processes in the system
  */
-class Processes
+class ProcessTable
 {
 public:
     /**
      * \return the instance of this class (singleton)
      */
-    static Processes& instance();
+    static ProcessTable& instance();
+
+    /**
+     * \return an unique pid that is not zero and is not already in use in the
+     * system, used to assign a pid to a new process.<br>
+     * Calling this function requires to first lock procMutex
+     */
+    pid_t getNewPid();
     
-    ///Used to assign a new pid to a process
-    pid_t pidCounter;
     ///Maps the pid to the Process instance. Includes zombie processes
     map<pid_t,ProcessBase *> processes;
     ///Uset to guard access to processes and pidCounter
-    Mutex procMutex;
+    KernelMutex procMutex;
     ///Used to wait on process termination
     ConditionVariable genericWaiting;
     
 private:
-    Processes()
+    ///Used to assign a new pid to a process
+    pid_t pidCounter=1;
+
+    ProcessTable()
     {
         ProcessBase *kernel=Thread::getCurrentThread()->getProcess();
         assert(kernel->getPid()==0);
         processes[0]=kernel;
     }
-    Processes(const Processes&)=delete;
-    Processes& operator=(const Processes&)=delete;
+    ProcessTable(const ProcessTable&)=delete;
+    ProcessTable& operator=(const ProcessTable&)=delete;
 };
 
-Processes& Processes::instance()
+ProcessTable& ProcessTable::instance()
 {
-    static Processes singleton;
+    static ProcessTable singleton;
     return singleton;
+}
+
+/**
+ * \return an unique pid that is not zero and is not already in use in the
+ * system, used to assign a pid to a new process.<br>
+ */
+pid_t ProcessTable::getNewPid()
+{
+    for(;;pidCounter++)
+    {
+        if(pidCounter<=0) pidCounter=1; //Zero/negative are not valid pid
+        auto it=processes.find(pidCounter);
+        if(it!=processes.end()) continue; //Pid number already used
+        return pidCounter++;
+    }
 }
 
 //
@@ -129,24 +167,24 @@ Processes& Processes::instance()
 pid_t Process::create(ElfProgram&& program, ArgsBlock&& args)
 {
     if(program.errorCode()) return program.errorCode();
-    Processes& p=Processes::instance();
+    auto& processTable=ProcessTable::instance();
     ProcessBase *parent=Thread::getCurrentThread()->proc;
     unique_ptr<Process> proc(new Process(parent->fileTable,
                                          std::move(program),std::move(args)));
     {   
-        Lock<Mutex> l(p.procMutex);
-        proc->pid=getNewPid();
+        Lock<KernelMutex> l(processTable.procMutex);
+        proc->pid=processTable.getNewPid();
         proc->ppid=parent->pid;
         parent->childs.push_back(proc.get());
-        p.processes[proc->pid]=proc.get();
+        processTable.processes[proc->pid]=proc.get();
     }
     auto thr=Thread::createUserspace(Process::start,proc.get());
     if(thr==nullptr)
     {
-        Lock<Mutex> l(p.procMutex);
-        p.processes.erase(proc->pid);
+        Lock<KernelMutex> l(processTable.procMutex);
+        processTable.processes.erase(proc->pid);
         parent->childs.remove(proc.get());
-        throw runtime_error("Thread creation failed");
+        throw bad_alloc(); //Thread allocation failed
     }
     //Cannot throw bad_alloc due to the reserve in Process's constructor.
     //This ensures we will never be in the uncomfortable situation where a
@@ -179,18 +217,19 @@ pid_t Process::spawn(const char *path, const char* const* argv,
 
 pid_t Process::getppid(pid_t proc)
 {
-    Processes& p=Processes::instance();
-    Lock<Mutex> l(p.procMutex);
-    map<pid_t,ProcessBase *>::iterator it=p.processes.find(proc);
-    if(it==p.processes.end()) return -1;
+    auto& processTable=ProcessTable::instance();
+    Lock<KernelMutex> l(processTable.procMutex);
+    auto it=processTable.processes.find(proc);
+    if(it==processTable.processes.end()) return -1;
     return it->second->ppid;
 }
 
 pid_t Process::waitpid(pid_t pid, int* exit, int options)
 {
-    Processes& p=Processes::instance();
-    Lock<Mutex> l(p.procMutex);
+    auto& processTable=ProcessTable::instance();
+    Lock<KernelMutex> l(processTable.procMutex);
     ProcessBase *self=Thread::getCurrentThread()->proc;
+    Process *joined=nullptr;
     if(pid<=0)
     {
         //Wait for a generic child process
@@ -198,47 +237,44 @@ pid_t Process::waitpid(pid_t pid, int* exit, int options)
         while(self->zombies.empty())
         {
             if(self->childs.empty()) return -ECHILD;
-            p.genericWaiting.wait(l);
+            processTable.genericWaiting.wait(l);
         }
-        Process *joined=self->zombies.front();
-        self->zombies.pop_front();
-        p.processes.erase(joined->pid);
-        if(joined->waitCount!=0) errorHandler(UNEXPECTED);
-        if(exit!=nullptr) *exit=joined->exitCode;
-        pid_t result=joined->pid;
-        delete joined;
-        return result;
+        joined=self->zombies.front();
+        if(extraChecks!=ExtraChecks::None && joined->waitCount!=0)
+            errorHandler(Error::UNEXPECTED);
     } else {
         //Wait on a specific child process
-        map<pid_t,ProcessBase *>::iterator it=p.processes.find(pid);
-        if(it==p.processes.end() || it->second->ppid!=self->pid
+        auto it=processTable.processes.find(pid);
+        if(it==processTable.processes.end() || it->second->ppid!=self->pid
                 || pid==self->pid) return -ECHILD;
         //Since the case when pid==0 has been singled out, this cast is safe
-        Process *joined=static_cast<Process*>(it->second);
-        if(joined->zombie==false)
+        joined=static_cast<Process*>(it->second);
+        while(joined->zombie==false)
         {
-            //Process hasn't terminated yet
-            if(options & WNOHANG) return 0;
+            if(options & WNOHANG) return 0; //Process hasn't terminated yet
             joined->waitCount++;
             joined->waiting.wait(l);
             joined->waitCount--;
-            if(joined->waitCount<0 || joined->zombie==false)
-                errorHandler(UNEXPECTED);
+            if(extraChecks!=ExtraChecks::None && joined->waitCount<0)
+                errorHandler(Error::UNEXPECTED);
         }
-        pid_t result=-1;
-        if(joined->waitCount==0)
-        {
-            result=joined->pid;
-            if(exit!=nullptr) *exit=joined->exitCode;
-            self->zombies.remove(joined);
-            p.processes.erase(joined->pid);
-            delete joined;
-        }
-        return result;
+        //waitCount implements areference counting strategy to make sure only
+        //only one waitpid returns each child, and no double-delete occurs
+        if(joined->waitCount>0) return -ECHILD;
     }
+
+    self->zombies.remove(joined);
+    processTable.processes.erase(joined->pid);
+    if(exit!=nullptr) *exit=joined->exitCode;
+    pid_t result=joined->pid;
+    delete joined;
+    return result;
 }
 
-Process::~Process() {}
+Process::~Process()
+{
+    for(auto t : threads) if(t) t->join();
+}
 
 Process::Process(const FileDescriptorTable& fdt, ElfProgram&& program,
         ArgsBlock&& args) : ProcessBase(fdt), waitCount(0), zombie(false)
@@ -297,16 +333,17 @@ void *Process::start(void *)
         unsigned int entry=proc->program.getEntryPoint();
         Thread::setupUserspaceContext(entry,proc->argc,proc->argvSp,proc->envp,
             proc->image.getProcessBasePointer(),proc->image.getMainStackSize());
-        SvcResult svcResult=Resume;
+        SvcResult svcResult;
         do {
-            miosix_private::SyscallParameters sp=Thread::switchToUserspace();
+            SyscallParameters sp=Thread::switchToUserspace();
 
             bool fault=proc->fault.faultHappened();
-            //Handle svc only if no fault occurred
-            if(fault==false) svcResult=proc->handleSvc(sp);
+            if(fault) svcResult=Segfault;
+            else svcResult=proc->handleSvc(sp); //Handle svc only if no fault
 
             if(Thread::testTerminate() || svcResult==Exit) running=false;
-            if(fault || svcResult==Segfault)
+            //Segfault either because fault==true or handleSvc returned Segfault
+            if(svcResult==Segfault)
             {
                 running=false;
                 proc->exitCode=SIGSEGV; //Segfault
@@ -325,29 +362,34 @@ void *Process::start(void *)
     } while(running);
     proc->fileTable.closeAll();
     {
-        Processes& p=Processes::instance();
-        Lock<Mutex> l(p.procMutex);
+        auto& processTable=ProcessTable::instance();
+        Lock<KernelMutex> l(processTable.procMutex);
         proc->zombie=true;
         list<Process*>::iterator it;
         for(it=proc->childs.begin();it!=proc->childs.end();++it) (*it)->ppid=0;
         for(it=proc->zombies.begin();it!=proc->zombies.end();++it) (*it)->ppid=0;
-        ProcessBase *kernel=p.processes[0];
+        ProcessBase *kernel=processTable.processes[0];
         kernel->childs.splice(kernel->childs.begin(),proc->childs);
         kernel->zombies.splice(kernel->zombies.begin(),proc->zombies);
         
-        map<pid_t,ProcessBase *>::iterator it2=p.processes.find(proc->ppid);
-        if(it2==p.processes.end()) errorHandler(UNEXPECTED);
+        auto it2=processTable.processes.find(proc->ppid);
+        if(it2==processTable.processes.end()) errorHandler(Error::UNEXPECTED);
         it2->second->childs.remove(proc);
         if(proc->waitCount>0) proc->waiting.broadcast();
-        else {
-            it2->second->zombies.push_back(proc);
-            p.genericWaiting.broadcast();
-        }
+        else it2->second->zombies.push_back(proc);
+        //This serves two purposes: first, it wakes the parent process in case
+        //it was waiting for any child. Note that this must be done also if
+        //waitCount is >0 as there may be both threads waiting on this specific
+        //child and threads waiting on a generic child, and if this is the only
+        //child, the latter will deadlock. Second, it will wake the kernel
+        //(process 0) so it can handle any zombies we may have spliced into its
+        //zombie list.
+        processTable.genericWaiting.broadcast();
     }
     return nullptr;
 }
 
-Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
+Process::SvcResult Process::handleSvc(SyscallParameters sp)
 {
     try {
         switch(static_cast<Syscall>(sp.getSyscallId()))
@@ -401,9 +443,9 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
             case Syscall::LSEEK:
             {
                 off_t pos=sp.getParameter(2);
-                pos|=static_cast<off_t>(sp.getParameter(1))<<32;
+                pos|=static_cast<off_t>(sp.getParameter(3))<<32;
                 off_t result=fileTable.lseek(sp.getParameter(0),pos,
-                    sp.getParameter(3));
+                    sp.getParameter(1));
                 sp.setParameter(0,result & 0xffffffff);
                 sp.setParameter(1,result>>32);
                 break;
@@ -451,7 +493,7 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                 //NOTE: some fcntl operations have an optional third parameter
                 //which can be either missing, an int or a pointer.
                 //Currenlty we do not support any with a pointer third arg, but
-                //we arr on the side of safety and either pass the int or pass
+                //we err on the side of safety and either pass the int or pass
                 //zero. When we'll support those with the pointer, we'll
                 //validate it here.
                 int result,cmd=sp.getParameter(1);
@@ -593,7 +635,7 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
             {
                 auto path=reinterpret_cast<const char*>(sp.getParameter(0));
                 off_t size=sp.getParameter(2);
-                size|=static_cast<off_t>(sp.getParameter(1))<<32;
+                size|=static_cast<off_t>(sp.getParameter(3))<<32;
                 if(mpu.withinForReading(path))
                 {
                     int result=fileTable.truncate(path,size);
@@ -605,7 +647,7 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
             case Syscall::FTRUNCATE:
             {
                 off_t size=sp.getParameter(2);
-                size|=static_cast<off_t>(sp.getParameter(1))<<32;
+                size|=static_cast<off_t>(sp.getParameter(3))<<32;
                 int result=fileTable.ftruncate(sp.getParameter(0),size);
                 sp.setParameter(0,result);
                 break;
@@ -673,9 +715,9 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
             {
                 int fds[2];
                 int result=fileTable.pipe(fds);
-                sp.setParameter(1,result); //Does not overwrite r0 on purpose
-                sp.setParameter(2,fds[0]);
-                sp.setParameter(3,fds[1]);
+                sp.setParameter(0,result);
+                sp.setParameter(1,fds[0]);
+                sp.setParameter(2,fds[1]);
                 break;
             }
 
@@ -685,42 +727,79 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                 break;
             }
 
-            case Syscall::GETTIME:
+            case Syscall::GETTIME64:
             {
-                //TODO: sp.getParameter(0) is clockid_t by there's no support yet
                 long long t=getTime();
                 sp.setParameter(0,t & 0xffffffff);
                 sp.setParameter(1,t>>32);
                 break;
             }
 
+            case Syscall::NANOSLEEP64:
+            {
+                long long t=sp.getParameter(0);
+                t|=static_cast<long long>(sp.getParameter(1))<<32;
+                Thread::nanoSleepUntil(t);
+                break;
+            }
+
+            case Syscall::GETTIME:
+            {
+                struct timespec tp;
+                int result=clock_gettime(sp.getParameter(0),&tp);
+                if(result==0)
+                {
+                    sp.setParameter(0,0);
+                    sp.setParameter(1,tp.tv_nsec);
+                    sp.setParameter(2,tp.tv_sec & 0xffffffff);
+                    sp.setParameter(3,tp.tv_sec>>32);
+                } else {
+                    sp.setParameter(0,-errno);
+                    sp.setParameter(1,0);
+                    sp.setParameter(2,0);
+                    sp.setParameter(3,0);
+                }
+                break;
+            }
+
             case Syscall::SETTIME:
             {
-//                 int clockid=sp.getParameter(0);
-//                 long long t=sp.getParameter(2);
-//                 t|=static_cast<long long>(sp.getParameter(1))<<32;
-                sp.setParameter(0,EFAULT); //NOTE: positive error codes
+                // struct timespec tp;
+                // int clockid=sp.getParameter(0);
+                // tp.tv_nsec=sp.getParameter(1);
+                // tp.tv_sec=sp.getParameter(2);
+                // tp.tv_sec|=static_cast<long long>(sp.getParameter(3))<<32;
+                sp.setParameter(0,-EFAULT); //TODO: stub
                 break;
             }
 
             case Syscall::NANOSLEEP:
             {
-                int clockidAndFlags=sp.getParameter(3);
-                long long t=sp.getParameter(0);
-                t|=static_cast<long long>(sp.getParameter(1))<<32;
-                //TODO support for clockid is not implemented yet
-                if((clockidAndFlags & (1<<8))==0) t+=getTime(); //Relative sleep?
-                Thread::nanoSleepUntil(t);
-                sp.setParameter(0,0);
+                auto *req=reinterpret_cast<struct timespec*>(sp.getParameter(2));
+                auto *rem=reinterpret_cast<struct timespec*>(sp.getParameter(3));
+                if(mpu.withinForReading(req,sizeof(struct timespec)) && (
+                   rem==nullptr || mpu.withinForWriting(rem,sizeof(struct timespec))))
+                {
+                    int result=clock_nanosleep(sp.getParameter(0),sp.getParameter(1),
+                        req,rem);
+                    sp.setParameter(0,result);
+                } else sp.setParameter(0,EFAULT); //NOTE: positive error code
                 break;
             }
 
             case Syscall::GETRES:
             {
                 struct timespec tv;
-                sp.setParameter(0,clock_getres(sp.getParameter(0),&tv));
-                //tv_sec not returned, clock resolutions >=1 second unsupported
-                sp.setParameter(2,tv.tv_nsec);
+                int result=clock_getres(sp.getParameter(0),&tv);
+                if(result==0)
+                {
+                    sp.setParameter(0,0);
+                    //tv_sec not returned, clock resolutions >=1 second unsupported
+                    sp.setParameter(1,tv.tv_nsec);
+                } else {
+                    sp.setParameter(0,-errno);
+                    sp.setParameter(1,0);
+                }
                 break;
             }
 
@@ -775,22 +854,24 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
 
             case Syscall::SPAWN:
             {
-                auto pidp=reinterpret_cast<pid_t*>(sp.getParameter(0));
-                auto path=reinterpret_cast<const char*>(sp.getParameter(1));
-                auto argv=reinterpret_cast<char* const*>(sp.getParameter(2));
-                auto envp=reinterpret_cast<char* const*>(sp.getParameter(3));
-                int narg=validateStringArray(mpu,argv);
-                int nenv=validateStringArray(mpu,envp);
-                if((!pidp || mpu.withinForWriting(pidp,sizeof(pid_t))) &&
-                   mpu.withinForReading(path) && narg>=0 && nenv>=0)
+                auto *ptr=reinterpret_cast<SpawnArgs*>(sp.getParameter(0));
+                if(!mpu.withinForReading(ptr,sizeof(SpawnArgs)))
                 {
-                    auto pid=Process::spawn(path,argv,envp,narg,nenv);
-                    if(pid>=0)
-                    {
-                        if(pidp) *pidp=pid;
-                        sp.setParameter(0,0);
-                    } else sp.setParameter(0,-pid); //NOTE: positive error codes
-                } else sp.setParameter(0,EFAULT); //NOTE: positive error codes
+                    sp.setParameter(0,-EFAULT);
+                    break;
+                }
+                SpawnArgs args;
+                memcpy(&args,ptr,sizeof(SpawnArgs));
+                int narg=validateStringArray(mpu,args.argv);
+                int nenv=validateStringArray(mpu,args.envp);
+                //TODO: validate and handle args.actions and args.attr
+                if(!mpu.withinForReading(args.path) || narg<0 || nenv<0)
+                {
+                    sp.setParameter(0,-EFAULT);
+                    break;
+                }
+                auto pid=Process::spawn(args.path,args.argv,args.envp,narg,nenv);
+                sp.setParameter(0,pid);
                 break;
             }
 
@@ -805,7 +886,8 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                 int pid=sp.getParameter(0);
                 auto wstatus=reinterpret_cast<int*>(sp.getParameter(1));
                 int options=sp.getParameter(2);
-                if(mpu.withinForWriting(wstatus,sizeof(int)) && aligned(wstatus))
+                if(wstatus==nullptr ||
+                   (mpu.withinForWriting(wstatus,sizeof(int)) && aligned(wstatus)))
                 {
                     int result=Process::waitpid(pid,wstatus,options);
                     sp.setParameter(0,result);
@@ -879,6 +961,12 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
                 break;
             }
 
+            case Syscall::SYSCONF:
+            {
+                sp.setParameter(0,sysconf(sp.getParameter(0)));
+                break;
+            }
+
             default:
                 exitCode=SIGSYS; //Bad syscall
                 #ifdef WITH_ERRLOG
@@ -890,19 +978,6 @@ Process::SvcResult Process::handleSvc(miosix_private::SyscallParameters sp)
         sp.setParameter(0,-ENOMEM);
     }
     return Resume;
-}
-
-pid_t Process::getNewPid()
-{
-    auto& p=Processes::instance();
-    for(;;p.pidCounter++)
-    {
-        if(p.pidCounter<0) p.pidCounter=1;
-        if(p.pidCounter==0) continue; //Zero is not a valid pid
-        map<pid_t,ProcessBase*>::iterator it=p.processes.find(p.pidCounter);
-        if(it!=p.processes.end()) continue; //Pid number already used
-        return p.pidCounter++;
-    }
 }
 
 //
@@ -957,7 +1032,7 @@ ArgsBlock::ArgsBlock(const char* const* argv, const char* const* envp, int narg,
 void ArgsBlock::relocateTo(char *target)
 {
     memcpy(target,block,blockSize);
-    auto relocate=[=](char *a)
+    auto relocate=[=, this](char *a)
     {
         char **element=reinterpret_cast<char**>(a);
         for(;*element!=nullptr;element++) *element=*element-block+target;

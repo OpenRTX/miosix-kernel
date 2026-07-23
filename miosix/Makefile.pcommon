@@ -1,0 +1,47 @@
+##
+## Common code for building Miosix processes
+##
+
+## KPATH and CONFPATH should be forwarded by the parent Makefile
+ifeq ($(KPATH),)
+    $(info Error: KPATH not specified)
+    $(error Error)
+endif
+ifeq ($(CONFPATH),)
+    $(info Error: CONFPATH not specified)
+    $(error Error)
+endif
+
+include $(KPATH)/arch/Makefile.inc
+
+AFLAGS   := $(CPU_FLAGS) $(PROC_AFLAGS_BASE) -c
+CFLAGS   := -D_DEFAULT_SOURCE=1 $(CPU_FLAGS) $(PROC_OPT_OPTIMIZATION) \
+            $(PROC_OPT_EXCEPT) $(PROC_CFLAGS_BASE) $(INCLUDE_DIRS)    \
+            -MMD -MP -c
+CXXFLAGS := -D_DEFAULT_SOURCE=1 $(CPU_FLAGS) $(PROC_OPT_OPTIMIZATION) \
+            $(PROC_OPT_EXCEPT)  $(PROC_CXXFLAGS_BASE) $(INCLUDE_DIRS) \
+            -MMD -MP -c
+LFLAGS   := $(CPU_FLAGS) $(PROC_LFLAGS_BASE)
+LINK_LIBS := $(LIBS)
+
+#TODO: this should be in arch/Makefile.inc but $(TOOLS_DIR) isn't defined there
+TOOLS_DIR := $(KPATH)/tools
+SZ := perl $(TOOLS_DIR)/miosix_size.pl --prefix=$(PREFIX)
+
+OBJ ?= $(addsuffix .o, $(basename $(SRC)))
+
+%.o : %.cpp
+	$(ECHO) "[CXX ] $<"
+	$(Q)$(CXX) $(CXXFLAGS) $< -o $@
+
+%.o : %.c
+	$(ECHO) "[CC  ] $<"
+	$(Q)$(CC)  $(CFLAGS) $< -o $@
+
+%.o: %.s
+	$(ECHO) "[AS  ] $<"
+	$(Q)$(CC)  $(AFLAGS) $< -o $@
+
+%.o: %.S
+	$(ECHO) "[AS  ] $<"
+	$(Q)$(CC)  $(AFLAGS) $< -o $@

@@ -1,5 +1,6 @@
 /***************************************************************************
  *   Copyright (C) 2010 by Terraneo Federico                               *
+ *   Copyright (C) 2025 by Daniele Cattaneo                                *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -26,57 +27,56 @@
  ***************************************************************************/
 
 #include "error.h"
-#include "kernel.h"
-#include "interfaces/portability.h"
-#include "interfaces/bsp.h"
+#include "miosix_settings.h"
+#include "lock.h"
+#include "interfaces/poweroff.h"
+#include "interfaces_private/smp.h"
 #include "logging.h"
 
 namespace miosix {
 
 void errorHandler(Error e)
 {
-    // Here we must be careful since this function can be called within an
-    // interrupt routine, and disabling interrupts within an interrupt
-    // routine must be avoided.
-    bool interrupts=areInterruptsEnabled();
-    if(interrupts) disableInterrupts();
-
-    //Recoverable errors: None
+    // Disable interrupts
+    fastDisableIrq();
+    #ifdef WITH_SMP
+    // On multicore try to make the other cores hang up. Do NOT take the GIL,
+    // as it could cause a deadlock if it is already taken by this core, or any
+    // other ones if they are waiting for some peripheral interrupt that will
+    // never happen. This is not strictly correct, of course, but this is an
+    // emergency situation anyway.
+    // The only real risk is corruption on the serial while logging.
+    IRQlockupOtherCores();
+    #endif
     
     //Unrecoverable errors
     switch(e)
     {
-        
-        case OUT_OF_MEMORY:
-            IRQerrorLog("\r\n***Out of memory\r\n");
-            break;
-        case STACK_OVERFLOW:
-            IRQerrorLog("\r\n***Stack overflow\r\n");
-            break;
-        case UNEXPECTED:
+        case Error::UNEXPECTED:
             IRQerrorLog("\r\n***Unexpected error\r\n");
             break;
-        case PAUSE_KERNEL_NESTING:
-            IRQerrorLog("\r\n***Pause kernel nesting\r\n");
+        case Error::OUT_OF_MEMORY:
+            IRQerrorLog("\r\n***Out of memory\r\n");
             break;
-        case DISABLE_INTERRUPTS_NESTING:
-            IRQerrorLog("\r\n***Disable interrupt nesting\r\n");
+        case Error::STACK_OVERFLOW:
+            IRQerrorLog("\r\n***Stack overflow\r\n");
             break;
-        case MUTEX_DEADLOCK:
-            IRQerrorLog("\r\n***Deadlock\r\n");
+        case Error::MUTEX_ERROR:
+            IRQerrorLog("\r\n***Mutex error\r\n");
             break;
-        case NESTING_OVERFLOW:
-            IRQerrorLog("\r\n***Nesting overflow\r\n"); 
-            break;
-        case INTERRUPTS_ENABLED_AT_BOOT:
+        case Error::INTERRUPTS_ENABLED_AT_BOOT:
             IRQerrorLog("\r\n***Interrupts enabled at boot\r\n");
+            break;
+        case Error::KERNEL_ALREADY_STARTED_AT_BOOT:
+            IRQerrorLog("\r\n***Kernel already started at boot\r\n");
+            break;
+        case Error::INTERRUPT_REGISTRATION_ERROR:
+            IRQerrorLog("\r\n***Interrupt registration error\r\n");
             break;
         default:
             break;
     }
-    miosix_private::IRQsystemReboot();
-
-    //if(interrupts) enableInterrupts(); // Not needed since no recoverable errors
+    IRQsystemReboot();
 }
 
 } //namespace miosix

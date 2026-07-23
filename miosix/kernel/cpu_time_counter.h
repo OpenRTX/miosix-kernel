@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2023 by Daniele Cattaneo                                *
+ *   Copyright (C) 2023,2025 by Daniele Cattaneo                           *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -27,8 +27,9 @@
 
 #pragma once
 
-#include "kernel.h"
+#include "thread.h"
 #include "cpu_time_counter_types.h"
+#include "interfaces/cpu_const.h"
 
 #ifdef WITH_CPU_TIME_COUNTER
 
@@ -44,7 +45,7 @@ namespace miosix {
  * much CPU time was used up to now by each thread in the system.
  * It is intended for debugging and evaluation purposes and is enabled only if
  * the symbol `WITH_CPU_TIME_COUNTER` has been defined in
- * config/miosix_settings.h.
+ * miosix_settings.h.
  * 
  * The implementation of this class collects this data by intercepting context
  * switch events. Due to the measurement method, some caveats apply to the data
@@ -55,20 +56,18 @@ namespace miosix {
  *    interrupted.
  * 
  * Retrieving the time accounting data for all threads is performed through the
- * iterator returned by PKbegin(). To prevent the thread list from changing
- * because of a context switch, keep the kernel paused while you traverse the
- * iterator.
+ * iterator returned by IRQbegin(). To prevent the thread list from changing
+ * because of a context switch, the iterator must be traversed while holding the
+ * global interrupt lock.
  * 
  * To simplify post-processing, the list of thread data information accessible
  * through the iterator always satisfies the following properties:
- *  - There is at least one item in the list.
- *  - The first item corresponds to the idle thread.
  *  - The threads are listed in creation order.
  *  - The relative order in which the items are iterated is deterministic and
  *    does not change even after a context switch.
- * 
  * These properties allow to compute the difference between two thread data
- * lists collected at different times in O(max(n,m)) complexity.
+ * lists collected at different times in O(max(n,m)) complexity. Idle threads
+ * do not appear in the lists.
  * 
  * \note This is a very low-level interface. For actual use, a more practical
  * alternative is miosix::CPUProfiler, which provides a top-like display of the
@@ -82,10 +81,17 @@ public:
      */
     struct Data
     {
+        enum {
+            NOT_READY=' ',
+            READY='r',
+            RUNNING='R'
+        };
         /// The thread the data belongs to
         Thread *thread;
-        /// Cumulative amount of CPU time scheduled to the thread in ns
-        long long usedCpuTime = 0; 
+        /// Amount of CPU time scheduled to the thread in ns for each core
+        long long usedCpuTime[CPU_NUM_CORES] = {0};
+        /// Flags at the time the data was collected
+        char state=NOT_READY;
     };
 
     /**
@@ -108,16 +114,32 @@ public:
         inline Data operator*()
         {
             Data res;
-            res.thread = cur;
-            res.usedCpuTime = cur->timeCounterData.usedCpuTime;
+            res.thread=cur;
+            if(res.thread->flags.isReady())
+            {
+                IRQgetReadyThreadData(res);
+            } else {
+                for(unsigned char i=0;i<CPU_NUM_CORES;i++)
+                {
+                    res.usedCpuTime[i]=cur->timeCounterData.usedCpuTime[i];
+                }
+            }
             return res;
         }
         inline bool operator==(const iterator& rhs) { return cur==rhs.cur; }
         inline bool operator!=(const iterator& rhs) { return cur!=rhs.cur; }
     private:
         friend class CPUTimeCounter;
+
+        /**
+         * \internal Helper function for handling computation of the amount of
+         * CPU run-time consumed up to now by a ready thread.
+         */
+        void IRQgetReadyThreadData(Data& res);
+
         Thread *cur;
-        iterator(Thread *cur) : cur(cur) {}
+        long long time;
+        iterator(Thread *cur, long long time) : cur(cur), time(time) {}
     };
 
     /**
@@ -133,57 +155,46 @@ public:
 
     /**
      * \returns the begin iterator for the thread data.
+     * \param time the current time.
      */
-    static iterator PKbegin()
+    static iterator IRQbegin(long long time)
     {
-        return iterator(head);
+        return iterator(head, time);
     }
 
     /**
      * \returns the end iterator for the thread data.
      */
-    static iterator PKend()
+    static iterator IRQend()
     {
-        return iterator(nullptr);
+        return iterator(nullptr, 0);
     }
 
-    /**
-     * \returns the amount of CPU run-time consumed up to now by the currently
-     * active thread.
-     */
-    static long long getActiveThreadTime();
-
 private:
-    // The following methods are called from basic_scheduler to notify
+    // The following methods are called from the schedulers to notify
     // CPUTimeCounter of various events.
     template<typename> friend class basic_scheduler;
+    friend class PriorityScheduler;
+    friend class EDFScheduler;
+    friend class ControlScheduler;
 
     // CPUTimeCounter cannot be constructed
     CPUTimeCounter() = delete;
 
     /**
      * \internal
-     * Add the idle thread to the list of threads tracked by CPUTimeCounter.
-     * \param thread The idle thread.
-     */
-    static inline void IRQaddIdleThread(Thread *thread)
-    {
-        thread->timeCounterData.next = head;
-        head = thread;
-        if(!tail) tail = thread;
-        nThreads++;
-    }
-
-    /**
-     * \internal
      * Add an item to the list of threads tracked by CPUTimeCounter.
      * \param thread The thread to be added.
      */
-    static inline void PKaddThread(Thread *thread)
+    static inline void IRQaddThread(Thread *thread)
     {
-        tail->timeCounterData.next = thread;
-        tail = thread;
-        if(!head) head = thread;
+        if(!head)
+        {
+            head=tail=thread;
+        } else {
+            tail->timeCounterData.next=thread;
+            tail=thread;
+        }
         nThreads++;
     }
 
@@ -192,26 +203,26 @@ private:
      * Update the list of threads tracked by CPUTimeCounter to remove dead
      * threads.
      */
-    static void PKremoveDeadThreads();
+    static void removeDeadThreads();
+
+    /**
+     * Function to be called in the context switch code to profile threads
+     * \param prev previously running thread
+     * \param prev thread to be scheduled next
+     * \param t (approximate) current time, a time point taken somewhere during
+     * the context switch code
+     */
+    static inline void IRQprofileContextSwitch(Thread *prev, Thread *next,
+        long long t, unsigned char coreId)
+    {
+        prev->timeCounterData.usedCpuTime[coreId]+=t-prev->timeCounterData.lastActivation;
+        next->timeCounterData.lastActivation=t;
+    }
     
     static Thread *head; ///< Head of the thread list
     static Thread *tail; ///< Tail of the thread list
-    static volatile unsigned int nThreads; ///< Number of threads in the list
+    static unsigned int nThreads; ///< Number of non-idle threads
 };
-
-/**
- * Function to be called in the context switch code to profile threads
- * \param prev time count struct of previously running thread
- * \param prev time count struct of thread to be scheduled next
- * \param t (approximate) current time, a time point taken somewhere during
- * the context switch code
- */
-static inline void IRQprofileContextSwitch(CPUTimeCounterPrivateThreadData& prev,
-    CPUTimeCounterPrivateThreadData& next, long long t)
-{
-    prev.usedCpuTime += t - prev.lastActivation;
-    next.lastActivation = t;
-}
 
 /**
  * \}
